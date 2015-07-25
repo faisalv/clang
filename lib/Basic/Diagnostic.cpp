@@ -70,6 +70,7 @@ DiagnosticsEngine::DiagnosticsEngine(
   ErrorsAsFatal = false;
   SuppressSystemWarnings = false;
   SuppressAllDiagnostics = false;
+  CurDiagnosticSuppresser = nullptr;
   ElideType = true;
   PrintTemplateTree = false;
   ShowColors = false;
@@ -121,9 +122,12 @@ void DiagnosticsEngine::Reset() {
   NumErrors = 0;
   TrapNumErrorsOccurred = 0;
   TrapNumUnrecoverableErrorsOccurred = 0;
-  
+  TrapNumUncompilableErrorsOccurred = 0;
+  TrapNumFatalErrorsOccurred = 0;
+
   CurDiagID = ~0U;
   LastDiagLevel = DiagnosticIDs::Ignored;
+  TrapLastDiagLevel = DiagnosticIDs::Ignored;
   DelayedDiagID = 0;
 
   // Clear state related to #pragma diagnostic.

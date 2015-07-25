@@ -382,6 +382,23 @@ def fno_modules_hide_internal_linkage :
 def fconcepts_ts : Flag<["-"], "fconcepts-ts">,
   HelpText<"Enable C++ Extensions for Concepts.">;
 
+def fufc : Flag<["-"], "fufc">,
+  HelpText<"Enable C++ unifed-function-call option 4 (favor as-written) from N4474.">;
+def fufc_favor_as_written : Flag<["-"], "fufc-favor-as-written">,
+  HelpText<"Enable C++ unifed-function-call option 4 (favor as-written) from N4474.">;
+def fufc_favor_member : Flag<["-"], "fufc-favor-member">,
+  HelpText<"Enable C++ unifed-function-call option 6 (favor member) from N4474.">;
+def fufc_warn : Flag<["-"], "fufc-warn">,
+  HelpText<"Enable C++ unifed-function-call warnings when transposing a function call.">;
+def fufc_stats : Flag<["-"], "fufc-stats">,
+  HelpText<"Enable C++ unifed-function-call statistics (# of calls transposed etc.).">;
+def fufc_stats_dump_all_calls : Flag<["-"], "fufc-stats-dump-all-calls">,
+  HelpText<"Print all calls if unified-function-call statistics are enabled.">;
+def fufc_arrowobj_as_ptr : Flag<["-"], "fufc-arrowobj">,
+  HelpText<"For unifed-function-call treat objects with member arrow operators as pointers.">;
+
+
+
 let Group = Action_Group in {
 
 def Eonly : Flag<["-"], "Eonly">,

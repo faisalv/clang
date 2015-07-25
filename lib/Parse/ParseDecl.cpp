@@ -2544,9 +2544,13 @@ Parser::DiagnoseMissingSemiAfterTagDefinition(DeclSpec &DS, AccessSpecifier AS,
       Actions.RestoreNestedNameSpecifierAnnotation(
           Tok.getAnnotationValue(), Tok.getAnnotationRange(), SS);
       IdentifierInfo *Name = AfterScope.getIdentifierInfo();
+      TokenBasedADLandUFCDeterminatorRAII AdlUfcRAII(*this,
+                                                     /*SkipCurToken*/ true, SS);
       Sema::NameClassification Classification = Actions.ClassifyName(
           getCurScope(), SS, Name, AfterScope.getLocation(), Next,
           /*IsAddressOfOperand*/false);
+      AdlUfcRAII.reset();
+
       switch (Classification.getKind()) {
       case Sema::NC_Error:
         SkipMalformedDecl();

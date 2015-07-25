@@ -2568,6 +2568,62 @@ private:
   void CodeCompleteNaturalLanguage() override;
 };
 
+
+struct TokenBasedADLandUFCDeterminatorRAII {
+  Parser &P;
+  bool Resetted;
+  const Optional<bool> PrevADL;
+  const Optional<bool> PrevUFC;
+  TokenBasedADLandUFCDeterminatorRAII(Parser &P, const bool SkipCurToken,
+                       const CXXScopeSpec &SS)
+      : P(P), Resetted(false), PrevADL(P.getActions().ConsiderADL),
+        PrevUFC(P.getActions().ConsiderUFC) {
+    Sema &S = P.getActions();
+    // If the scope specifier is set, this is a qualified id, so disable ADL and UFC
+    if (SS.isSet()) {
+      S.ConsiderADL = false;
+      S.ConsiderUFC = false;
+      return;
+    }
+    unsigned NumRParens = 0;
+    
+    bool IsLParenFollowingRParensOrID =
+        (SkipCurToken ? P.NextToken() : P.getCurToken()).is(tok::l_paren);
+    const Token &Tok = SkipCurToken ? P.NextToken() : P.getCurToken();
+    if (Tok.getKind() == tok::r_paren) {
+      while (P.getPreprocessor()
+                 .LookAhead(NumRParens++ + (SkipCurToken ? 1 : 0))
+                 .getKind() == tok::r_paren)
+        ;
+    }
+    if (NumRParens) {
+      //S.NumberOfRParensFollowingID = NumRParens;
+      IsLParenFollowingRParensOrID =
+          P.getPreprocessor()
+              .LookAhead(NumRParens - (SkipCurToken ? 0 : 1))
+              .getKind() == tok::l_paren;
+    }
+    // Consider ADL if 0 or 2 parens around the identifier
+    S.ConsiderADL =
+        IsLParenFollowingRParensOrID &&
+        (NumRParens == 0 ||
+         (S.getLangOpts().isUnifiedFunctionCallEnabled() && NumRParens == 2));
+    // Consdier UFC only if < 2 parens around the identifier
+    S.ConsiderUFC = S.getLangOpts().isUnifiedFunctionCallEnabled() &&
+                    IsLParenFollowingRParensOrID && NumRParens < 2;
+  }
+  void reset() {
+    if (Resetted) return;
+    Sema &S = P.getActions();
+    S.ConsiderUFC = PrevUFC;
+    S.ConsiderADL = PrevADL;
+    Resetted = true;
+  }
+  ~TokenBasedADLandUFCDeterminatorRAII() {
+    reset();
+  }
+};
+
 }  // end namespace clang
 
 #endif

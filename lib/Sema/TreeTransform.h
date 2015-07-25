@@ -7843,8 +7843,11 @@ TreeTransform<Derived>::TransformArraySubscriptExpr(ArraySubscriptExpr *E) {
 template<typename Derived>
 ExprResult
 TreeTransform<Derived>::TransformCallExpr(CallExpr *E) {
+
+  ASTBasedADLandUFCDeterminatorRAII AdlUfcRAII(SemaRef, E->getCallee());
   // Transform the callee.
   ExprResult Callee = getDerived().TransformExpr(E->getCallee());
+  
   if (Callee.isInvalid())
     return ExprError();
 
@@ -7863,9 +7866,28 @@ TreeTransform<Derived>::TransformCallExpr(CallExpr *E) {
   // FIXME: Wrong source location information for the '('.
   SourceLocation FakeLParenLoc
     = ((Expr *)Callee.get())->getSourceRange().getBegin();
-  return getDerived().RebuildCallExpr(Callee.get(), FakeLParenLoc,
+  
+  // FVFIXME: This is a kludge, we should pass in the transformed definition
+  // context lookup expression instead of temporarily rewiring it so that it can
+  // be access through the CallExprsBeingInstantiated stack!
+  Expr *OldDefCtxE = E->getDefinitionContextLookupOfIdExpr();
+  Expr *NewDefCtxE = nullptr;
+  if (OldDefCtxE) {
+    ExprResult NewDefCtxER = getDerived().TransformExpr(OldDefCtxE);
+    if (NewDefCtxER.isUsable())
+      NewDefCtxE = NewDefCtxER.get();
+    E->setDefinitionContextLookupOfIdExpr(NewDefCtxE);
+  }
+  ExprResult NewCallER = getDerived().RebuildCallExpr(Callee.get(), FakeLParenLoc,
                                       Args,
                                       E->getRParenLoc());
+  
+  // Restore the appropriate definition context lookups of both call expression.
+  // FVFIXME: ugh! see above
+  E->setDefinitionContextLookupOfIdExpr(OldDefCtxE);
+  if (!NewCallER.isInvalid() && isa<CallExpr>(NewCallER.get()))
+    cast<CallExpr>(NewCallER.get())->setDefinitionContextLookupOfIdExpr(NewDefCtxE);
+  return NewCallER;
 }
 
 template<typename Derived>

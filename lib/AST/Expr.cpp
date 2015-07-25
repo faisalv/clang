@@ -1128,7 +1128,8 @@ CallExpr::CallExpr(const ASTContext& C, StmtClass SC, Expr *fn,
          fn->isValueDependent(),
          fn->isInstantiationDependent(),
          fn->containsUnexpandedParameterPack()),
-    NumArgs(args.size()) {
+    NumArgs(args.size()), IsTransposedCall(false), 
+    DefinitionContextLookupOfIdExpr(nullptr) {
 
   SubExprs = new (C) Stmt*[args.size()+PREARGS_START+NumPreArgs];
   SubExprs[FN] = fn;
@@ -1159,7 +1160,8 @@ CallExpr::CallExpr(const ASTContext &C, StmtClass SC, EmptyShell Empty)
 
 CallExpr::CallExpr(const ASTContext &C, StmtClass SC, unsigned NumPreArgs,
                    EmptyShell Empty)
-  : Expr(SC, Empty), SubExprs(nullptr), NumArgs(0) {
+    : Expr(SC, Empty), SubExprs(nullptr), NumArgs(0), IsTransposedCall(false),
+      DefinitionContextLookupOfIdExpr(nullptr) {
   // FIXME: Why do we allocate this?
   SubExprs = new (C) Stmt*[PREARGS_START+NumPreArgs];
   CallExprBits.NumPreArgs = NumPreArgs;
@@ -1288,6 +1290,12 @@ SourceLocation CallExpr::getLocEnd() const {
   if (end.isInvalid() && getNumArgs() > 0 && getArg(getNumArgs() - 1))
     end = getArg(getNumArgs() - 1)->getLocEnd();
   return end;
+}
+
+UnresolvedLookupExpr *
+CallExpr::getDefinitionContextLookupOfIdAsUnresolvedExpr() const {
+  return dyn_cast_or_null<UnresolvedLookupExpr>(
+      DefinitionContextLookupOfIdExpr);
 }
 
 OffsetOfExpr *OffsetOfExpr::Create(const ASTContext &C, QualType type,

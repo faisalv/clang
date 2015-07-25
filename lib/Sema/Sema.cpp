@@ -945,6 +945,8 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
   // eliminnated. If it truly cannot be (for example, there is some reentrancy
   // issue I am not seeing yet), then there should at least be a clarifying
   // comment somewhere.
+  const auto DiagLevel = Diags.getDiagnosticLevel(
+        Diags.getCurrentDiagID(), Diags.getCurrentDiagLoc());
   if (Optional<TemplateDeductionInfo*> Info = isSFINAEContext()) {
     switch (DiagnosticIDs::getDiagnosticSFINAEResponse(
               Diags.getCurrentDiagID())) {
@@ -1023,18 +1025,30 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
   Context.setPrintingPolicy(getPrintingPolicy());
 
   // Emit the diagnostic.
-  if (!Diags.EmitCurrentDiagnostic())
+  if (!Diags.EmitCurrentDiagnostic()) {
+    // FVTODO: do this only if we are intercepting all suppressed diagnostics.
+
+    if (Diags.getSuppressAllDiagnostics() &&
+        DiagLevel != DiagnosticsEngine::Ignored)
+      goto print_instantiation_stack;
     return;
+  }
 
   // If this is not a note, and we're in a template instantiation
   // that is different from the last template instantiation where
   // we emitted an error, print a template instantiation
   // backtrace.
+print_instantiation_stack:
   if (!DiagnosticIDs::isBuiltinNote(DiagID) &&
       !ActiveTemplateInstantiations.empty() &&
       ActiveTemplateInstantiations.back()
         != LastTemplateInstantiationErrorContext) {
     PrintInstantiationStack();
+    // FVTODO: Install in the diagnostic trap the
+    // lasttemplateinstantiationErrorContext - and then when diagnostics are
+    // suppressed, retrieve the current trap - and within it set the last
+    // templateinstantiation context, because we need to print out the
+    // instantiation once per trap that has no reported the stack.
     LastTemplateInstantiationErrorContext = ActiveTemplateInstantiations.back();
   }
 }
@@ -1455,8 +1469,10 @@ bool Sema::tryToRecoverWithCall(ExprResult &E, const PartialDiagnostic &PD,
 
     // FIXME: Try this before emitting the fixit, and suppress diagnostics
     // while doing so.
+    IsBuildingRecoveryCallExpr = true;
     E = ActOnCallExpr(nullptr, E.get(), Range.getEnd(), None,
                       Range.getEnd().getLocWithOffset(1));
+    IsBuildingRecoveryCallExpr = false;
     return true;
   }
 

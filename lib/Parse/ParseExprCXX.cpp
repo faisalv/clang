@@ -605,6 +605,8 @@ ExprResult Parser::tryParseCXXIdExpression(CXXScopeSpec &SS, bool isAddressOfOpe
   if (isAddressOfOperand && isPostfixExpressionSuffixStart())
     isAddressOfOperand = false;
 
+  TokenBasedADLandUFCDeterminatorRAII AdlUfcRAII(*this, /*SkipCurToken*/ false,
+                                                 SS);
   return Actions.ActOnIdExpression(getCurScope(), SS, TemplateKWLoc, Name,
                                    Tok.is(tok::l_paren), isAddressOfOperand,
                                    nullptr, /*IsInlineAsmIdentifier=*/false,

@@ -63,7 +63,7 @@ namespace sad {
   template<typename T> void swap(T &, T &);
 
   template<typename A, typename B> struct CLASS {
-    void swap(CLASS &other) noexcept(noexcept(swap(*this, other))); // expected-error {{too many arguments}} expected-note {{declared here}}
+    void swap(CLASS &other) noexcept(noexcept(((swap))(*this, other))); // expected-error {{too many arguments}} expected-note {{declared here}}
   };
 
   CLASS<int, int> pi;

@@ -766,14 +766,19 @@ Sema::ClassifyName(Scope *S, CXXScopeSpec &SS, IdentifierInfo *&Name,
   
 Corrected:
   switch (Result.getResultKind()) {
-  case LookupResult::NotFound:
+  case LookupResult::NotFound: {
     // If an unqualified-id is followed by a '(', then we have a function
-    // call.
-    if (!SS.isSet() && NextToken.is(tok::l_paren)) {
+    // call - so consider adl or unified function call if the flags are 
+    // set in sema.
+
+    if (!SS.isSet() && (ConsiderADL.getValue() || ConsiderUFC.getValue())) {
       // In C++, this is an ADL-only call.
       // FIXME: Reference?
+      
       if (getLangOpts().CPlusPlus)
-        return BuildDeclarationNameExpr(SS, Result, /*ADL=*/true);
+        return BuildDeclarationNameExpr(SS, Result, /*ADL=*/ConsiderADL.getValue(), 
+                                        /*AcceptInvalidDecl*/false,
+                                        ConsiderUFC.getValue());
       
       // C90 6.3.2.2:
       //   If the expression that precedes the parenthesized argument list in a 
@@ -870,7 +875,7 @@ Corrected:
     // We failed to correct; just fall through and let the parser deal with it.
     Result.suppressDiagnostics();
     return NameClassification::Unknown();
-      
+  }    
   case LookupResult::NotFoundInCurrentInstantiation: {
     // We performed name lookup into the current instantiation, and there were 
     // dependent bases, so we treat this result the same way as any other

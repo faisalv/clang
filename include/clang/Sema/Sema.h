@@ -323,6 +323,11 @@ public:
   /// \brief Controls member pointer representation format under the MS ABI.
   LangOptions::PragmaMSPointersToMembersKind
       MSPointerToMemberRepresentationMethod;
+  /// This information is primarily used for unified function call - when
+  /// parsing, we check if the subsequent tokens enable ADL or UFC and if
+  /// transforming, we can check the number of surrounding paren exprs.
+  Optional<bool> ConsiderADL;
+  Optional<bool> ConsiderUFC;
 
   enum PragmaVtorDispKind {
     PVDK_Push,          ///< #pragma vtordisp(push, mode)
@@ -596,6 +601,16 @@ public:
       CurPool = state.SavedPool;
     }
   } DelayedDiagnostics;
+
+  // When diagnostics are suppressed, store the list of PartialDiagnostics that
+  // are created but delayed within the current function scope into this
+  // container -- and if these diagnostics need to be unsuppressed, they get
+  // transferred into the corresponding functionScopeInfo for them to be vetted
+  // for reachability prior to being emitted, at the end of function body
+  // analysis.
+  std::vector<
+      std::pair<sema::FunctionScopeInfo *, sema::PossiblyUnreachableDiag>>
+      SuppressedPossiblyUnreachableDiags;
 
   /// A RAII object to temporarily push a declaration context.
   class ContextRAII {
@@ -2513,7 +2528,17 @@ public:
                                      MultiExprArg Args,
                                      SourceLocation RParenLoc,
                                      Expr *ExecConfig,
-                                     bool AllowTypoCorrection=true);
+                                     bool AllowTypoCorrection=true,
+                                bool IsTransposingForUnifiedFunctionCall=false);
+
+  ExprResult TryBuildCallAsMemberFunction(Scope *S, Expr *Fn,
+                                          SourceLocation LParenLoc,
+                                          MultiExprArg Args,
+                                          SourceLocation RParenLoc);
+
+  ExprResult TryBuildCallAsNonMemberFunction(
+      Scope *S, Expr *MemExprE, SourceLocation LParenLoc, MultiExprArg Args,
+      SourceLocation RParenLoc);
 
   bool buildOverloadedCallSet(Scope *S, Expr *Fn, UnresolvedLookupExpr *ULE,
                               MultiExprArg Args, SourceLocation RParenLoc,
@@ -2538,7 +2563,8 @@ public:
   BuildCallToMemberFunction(Scope *S, Expr *MemExpr,
                             SourceLocation LParenLoc,
                             MultiExprArg Args,
-                            SourceLocation RParenLoc);
+                            SourceLocation RParenLoc, 
+                            bool IsTransposingForUnifiedFunctionCall=false);
   ExprResult
   BuildCallToObjectOfClassType(Scope *S, Expr *Object, SourceLocation LParenLoc,
                                MultiExprArg Args,
@@ -3636,6 +3662,15 @@ public:
       std::unique_ptr<CorrectionCandidateCallback> CCC = nullptr,
       bool IsInlineAsmIdentifier = false, Token *KeywordReplacement = nullptr);
 
+  ExprResult
+  ActOnIdExpression(Scope *S, CXXScopeSpec &SS, SourceLocation TemplateKWLoc,
+                    const TemplateArgumentListInfo *TemplateArgs,
+                    DeclarationNameInfo &NameInfo,
+                    UnqualifiedId::IdKind IdKind, bool HasTrailingLParen,
+                    bool IsAddressOfOperand, 
+                    std::unique_ptr<CorrectionCandidateCallback> CCC,
+                    bool IsInlineAsmIdentifier, Token *KeywordReplacement);
+
   void DecomposeUnqualifiedId(const UnqualifiedId &Id,
                               TemplateArgumentListInfo &Buffer,
                               DeclarationNameInfo &NameInfo,
@@ -3701,7 +3736,8 @@ public:
   ExprResult BuildDeclarationNameExpr(const CXXScopeSpec &SS,
                                       LookupResult &R,
                                       bool NeedsADL,
-                                      bool AcceptInvalidDecl = false);
+                                      bool AcceptInvalidDecl = false,
+                                      bool NeedsUFC = false);
   ExprResult BuildDeclarationNameExpr(
       const CXXScopeSpec &SS, const DeclarationNameInfo &NameInfo, NamedDecl *D,
       NamedDecl *FoundD = nullptr,
@@ -3796,8 +3832,10 @@ public:
   // defines a custom operator->).
   struct ActOnMemberAccessExtraArgs {
     Scope *S;
-    UnqualifiedId &Id;
     Decl *ObjCImpDecl;
+    const DeclarationNameInfo &NameInfo;
+    const TemplateArgumentListInfo *TemplateArgs;
+    const UnqualifiedId::IdKind IdKind;
   };
 
   ExprResult BuildMemberReferenceExpr(
@@ -3837,7 +3875,13 @@ public:
                                    SourceLocation TemplateKWLoc,
                                    UnqualifiedId &Member,
                                    Decl *ObjCImpDecl);
-
+  ExprResult ActOnMemberAccessExpr(Scope *S, Expr *Base, SourceLocation OpLoc,
+                                   tok::TokenKind OpKind, CXXScopeSpec &SS,
+                                   SourceLocation TemplateKWLoc,
+                                   const TemplateArgumentListInfo *TemplateArgs,
+                                   const DeclarationNameInfo &NameInfo,
+                                   UnqualifiedId::IdKind IdKind,
+                                   Decl *ObjCImpDecl);
   void ActOnDefaultCtorInitializers(Decl *CDtorDecl);
   bool ConvertArgumentsForCall(CallExpr *Call, Expr *Fn,
                                FunctionDecl *FDecl,
@@ -3855,7 +3899,8 @@ public:
   ExprResult ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
                            MultiExprArg ArgExprs, SourceLocation RParenLoc,
                            Expr *ExecConfig = nullptr,
-                           bool IsExecConfig = false);
+                           bool IsExecConfig = false, 
+                           bool IsTransposingForUnifiedFunctionCall = false);
   ExprResult BuildResolvedCallExpr(Expr *Fn, NamedDecl *NDecl,
                                    SourceLocation LParenLoc,
                                    ArrayRef<Expr *> Arg,
@@ -6769,7 +6814,7 @@ public:
         SemaRef.InNonInstantiationSFINAEContext = true;
       SemaRef.AccessCheckingSFINAE = AccessCheckingSFINAE;
     }
-
+    
     ~SFINAETrap() {
       SemaRef.NumSFINAEErrors = PrevSFINAEErrors;
       SemaRef.InNonInstantiationSFINAEContext

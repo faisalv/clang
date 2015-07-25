@@ -1829,9 +1829,7 @@ Sema::DiagnoseEmptyLookup(Scope *S, CXXScopeSpec &SS, LookupResult &R,
         if (isInstance) {
           Diag(R.getNameLoc(), diagnostic) << Name
             << FixItHint::CreateInsertion(R.getNameLoc(), "this->");
-          UnresolvedLookupExpr *ULE = cast<UnresolvedLookupExpr>(
-              CallsUndergoingInstantiation.back()->getCallee());
-
+          
           CXXMethodDecl *DepMethod;
           if (CurMethod->isDependentContext())
             DepMethod = CurMethod;
@@ -1848,19 +1846,36 @@ Sema::DiagnoseEmptyLookup(Scope *S, CXXScopeSpec &SS, LookupResult &R,
           CheckCXXThisCapture(R.getNameLoc());
           CXXThisExpr *DepThis = new (Context) CXXThisExpr(
                                      R.getNameLoc(), DepThisType, false);
-          TemplateArgumentListInfo TList;
-          if (ULE->hasExplicitTemplateArgs())
-            ULE->copyTemplateArgumentsInto(TList);
+          TemplateArgumentListInfo TList; 
+          TemplateArgumentListInfo *TListP = nullptr;
+          SourceLocation TemplateKWLoc;
+          NestedNameSpecifierLoc QualifierNNSLoc;
+          Expr *const Callee = CallsUndergoingInstantiation.back()->getCallee();
+          if (OverloadExpr *OE = dyn_cast<OverloadExpr>(Callee)) {
+            if (OE->hasExplicitTemplateArgs()) {
+              OE->copyTemplateArgumentsInto(TList);
+              TListP = &TList;
+            }
+            QualifierNNSLoc = OE->getQualifierLoc();
+            TemplateKWLoc = OE->getTemplateKeywordLoc();
+          } else if (MemberExpr *ME = cast<MemberExpr>(Callee)) {
+            if (ME->hasExplicitTemplateArgs()) {
+              ME->copyTemplateArgumentsInto(TList);
+              TListP = &TList;
+            }
+            QualifierNNSLoc = ME->getQualifierLoc();
+            TemplateKWLoc = ME->getTemplateKeywordLoc();
+          }
           
           CXXScopeSpec SS;
-          SS.Adopt(ULE->getQualifierLoc());
+          SS.Adopt(QualifierNNSLoc);
           CXXDependentScopeMemberExpr *DepExpr =
               CXXDependentScopeMemberExpr::Create(
                   Context, DepThis, DepThisType, true, SourceLocation(),
                   SS.getWithLocInContext(Context),
-                  ULE->getTemplateKeywordLoc(), nullptr,
+                  TemplateKWLoc, nullptr,
                   R.getLookupNameInfo(),
-                  ULE->hasExplicitTemplateArgs() ? &TList : nullptr);
+                  TListP);
           CallsUndergoingInstantiation.back()->setCallee(DepExpr);
         } else {
           Diag(R.getNameLoc(), diagnostic) << Name;
@@ -2062,10 +2077,11 @@ recoverFromMSUnqualifiedLookup(Sema &S, ASTContext &Context,
       TemplateArgs);
 }
 
+
 ExprResult
 Sema::ActOnIdExpression(Scope *S, CXXScopeSpec &SS,
                         SourceLocation TemplateKWLoc, UnqualifiedId &Id,
-                        bool HasTrailingLParen, bool IsAddressOfOperand,
+                        bool HasTrailingLParen, bool IsAddressOfOperand, 
                         std::unique_ptr<CorrectionCandidateCallback> CCC,
                         bool IsInlineAsmIdentifier, Token *KeywordReplacement) {
   assert(!(IsAddressOfOperand && HasTrailingLParen) &&
@@ -2079,7 +2095,25 @@ Sema::ActOnIdExpression(Scope *S, CXXScopeSpec &SS,
   DeclarationNameInfo NameInfo;
   const TemplateArgumentListInfo *TemplateArgs;
   DecomposeUnqualifiedId(Id, TemplateArgsBuffer, NameInfo, TemplateArgs);
+  return ActOnIdExpression(S, SS, TemplateKWLoc, TemplateArgs, NameInfo,
+                           Id.getKind(), HasTrailingLParen, IsAddressOfOperand,
+                           std::move(CCC), IsInlineAsmIdentifier,
+                           KeywordReplacement);
+}
 
+ExprResult
+Sema::ActOnIdExpression(Scope *S, CXXScopeSpec &SS,
+                        SourceLocation TemplateKWLoc, 
+                        const TemplateArgumentListInfo *TemplateArgs,
+                        DeclarationNameInfo &NameInfo,
+                        UnqualifiedId::IdKind IdKind,
+                        bool HasTrailingLParen, bool IsAddressOfOperand, 
+                        std::unique_ptr<CorrectionCandidateCallback> CCC,
+                        bool IsInlineAsmIdentifier, Token *KeywordReplacement) {
+  assert(!(IsAddressOfOperand && HasTrailingLParen) &&
+         "cannot be direct & operand and have a trailing lparen");
+  if (SS.isInvalid())
+    return ExprError();
   DeclarationName Name = NameInfo.getName();
   IdentifierInfo *II = Name.getAsIdentifierInfo();
   SourceLocation NameLoc = NameInfo.getLoc();
@@ -2114,7 +2148,7 @@ Sema::ActOnIdExpression(Scope *S, CXXScopeSpec &SS,
 
   // Perform the required lookup.
   LookupResult R(*this, NameInfo, 
-                 (Id.getKind() == UnqualifiedId::IK_ImplicitSelfParam) 
+                 (IdKind == UnqualifiedId::IK_ImplicitSelfParam) 
                   ? LookupObjCImplicitSelfParam : LookupOrdinaryName);
   if (TemplateArgs) {
     // Lookup the template name again to correctly establish the context in
@@ -2164,9 +2198,9 @@ Sema::ActOnIdExpression(Scope *S, CXXScopeSpec &SS,
 
   // Determine whether this name might be a candidate for
   // argument-dependent lookup.
-  bool ADL = UseArgumentDependentLookup(SS, R, HasTrailingLParen);
-
-  if (R.empty() && !ADL) {
+  const bool ADL = UseArgumentDependentLookup(SS, R, HasTrailingLParen);
+  const bool NeedsUFC = ConsiderUFC.hasValue() && ConsiderUFC.getValue();
+  if (R.empty() && !ADL && !NeedsUFC) {
     if (SS.isEmpty() && getLangOpts().MSVCCompat) {
       if (Expr *E = recoverFromMSUnqualifiedLookup(*this, Context, NameInfo,
                                                    TemplateKWLoc, TemplateArgs))
@@ -2235,7 +2269,7 @@ Sema::ActOnIdExpression(Scope *S, CXXScopeSpec &SS,
   }
 
   // This is guaranteed from this point on.
-  assert(!R.empty() || ADL);
+  assert(!R.empty() || ADL || NeedsUFC);
 
   // Check whether this might be a C++ implicit instance member access.
   // C++ [class.mfct.non-static]p3:
@@ -2282,20 +2316,18 @@ Sema::ActOnIdExpression(Scope *S, CXXScopeSpec &SS,
   }
 
   if (TemplateArgs || TemplateKWLoc.isValid()) {
-
     // In C++1y, if this is a variable template id, then check it
     // in BuildTemplateIdExpr().
     // The single lookup result must be a variable template declaration.
-    if (Id.getKind() == UnqualifiedId::IK_TemplateId && Id.TemplateId &&
-        Id.TemplateId->Kind == TNK_Var_template) {
-      assert(R.getAsSingle<VarTemplateDecl>() &&
-             "There should only be one declaration found.");
-    }
-
+    //if (IdKind == UnqualifiedId::IK_TemplateId && Id.TemplateId &&
+    //    Id.TemplateId->Kind == TNK_Var_template) {
+    //  assert(R.getAsSingle<VarTemplateDecl>() &&
+    //         "There should only be one declaration found.");
+    //}
     return BuildTemplateIdExpr(SS, TemplateKWLoc, R, ADL, TemplateArgs);
   }
 
-  return BuildDeclarationNameExpr(SS, R, ADL);
+  return BuildDeclarationNameExpr(SS, R, ADL, NeedsUFC);
 }
 
 /// BuildQualifiedDeclarationNameExpr - Build a C++ qualified
@@ -2450,7 +2482,8 @@ Sema::LookupInObjCMethod(LookupResult &Lookup, Scope *S,
       CXXScopeSpec SelfScopeSpec;
       SourceLocation TemplateKWLoc;
       ExprResult SelfExpr = ActOnIdExpression(S, SelfScopeSpec, TemplateKWLoc,
-                                              SelfName, false, false);
+                                              SelfName, false, false, 
+                                              nullptr, false, nullptr);
       if (SelfExpr.isInvalid())
         return ExprError();
 
@@ -2685,9 +2718,10 @@ bool Sema::UseArgumentDependentLookup(const CXXScopeSpec &SS,
                                       const LookupResult &R,
                                       bool HasTrailingLParen) {
   // Only when used directly as the postfix-expression of a call.
-  if (!HasTrailingLParen)
-    return false;
 
+  if (!HasTrailingLParen &&
+      (!ConsiderADL.hasValue() || !ConsiderADL.getValue()))
+    return false;
   // Never if a scope specifier was provided.
   if (SS.isSet())
     return false;
@@ -2762,10 +2796,12 @@ static bool CheckDeclInExpr(Sema &S, SourceLocation Loc, NamedDecl *D) {
 
 ExprResult Sema::BuildDeclarationNameExpr(const CXXScopeSpec &SS,
                                           LookupResult &R, bool NeedsADL,
-                                          bool AcceptInvalidDecl) {
+                                          bool AcceptInvalidDecl,
+                                          const bool NeedsUFC) {
   // If this is a single, fully-resolved result and we don't need ADL,
   // just build an ordinary singleton decl ref.
-  if (!NeedsADL && R.isSingleResult() && !R.getAsSingle<FunctionTemplateDecl>())
+  if (!NeedsUFC && !NeedsADL && R.isSingleResult() &&
+      !R.getAsSingle<FunctionTemplateDecl>())
     return BuildDeclarationNameExpr(SS, R.getLookupNameInfo(), R.getFoundDecl(),
                                     R.getRepresentativeDecl(), nullptr,
                                     AcceptInvalidDecl);
@@ -4151,7 +4187,6 @@ ExprResult Sema::BuildCXXDefaultArgExpr(SourceLocation CallLoc,
 
     EnterExpressionEvaluationContext EvalContext(*this, PotentiallyEvaluated,
                                                  Param);
-
     // Instantiate the expression.
     MultiLevelTemplateArgumentList MutiLevelArgList
       = getTemplateInstantiationArgs(FD, nullptr, /*RelativeToPrimary=*/true);
@@ -4181,6 +4216,8 @@ ExprResult Sema::BuildCXXDefaultArgExpr(SourceLocation CallLoc,
       = InitializationKind::CreateCopy(Param->getLocation(),
              /*FIXME:EqualLoc*/UninstExpr->getLocStart());
     Expr *ResultE = Result.getAs<Expr>();
+    
+    
 
     InitializationSequence InitSeq(*this, Entity, Kind, ResultE);
     Result = InitSeq.Perform(*this, Entity, Kind, ResultE);
@@ -4723,20 +4760,86 @@ static FunctionDecl *rewriteBuiltinFunctionDecl(Sema *Sema, ASTContext &Context,
   return OverloadDecl;
 }
 
+unsigned UFC_TotalNumOfNonDependentCallExprs;
+unsigned UFC_NumOfTransposedCalls;
+std::vector<CallExpr *> UFC_VecOfCallExprs;
+
+struct UFCAccountant {
+  Sema &S;
+  ExprResult &Ret;
+  const bool IsDependentCtx;
+  const bool IsAttemptingTranspose;
+  UFCAccountant(Sema &S, ExprResult &Ret, bool IsAttemptingTranspose)
+      : S(S), Ret(Ret), IsDependentCtx(S.CurContext->isDependentContext()),
+        IsAttemptingTranspose(IsAttemptingTranspose) {}
+  ~UFCAccountant() {
+    if (IsDependentCtx) return;
+    if (IsAttemptingTranspose) return;
+    if (S.IsBuildingRecoveryCallExpr) return;
+    if (!S.getLangOpts().isUFCStatsOn() &&
+        !S.getLangOpts().isUFCWarnAboutTranspose())
+      return;
+    if (Ret.isUsable()) {
+      Expr *RetE = isa<CXXBindTemporaryExpr>(Ret.get())
+                       ? cast<CXXBindTemporaryExpr>(Ret.get())->getSubExpr()
+                       : Ret.get();
+      // FVTODO: How does an AtomicExpr get here?
+      if (isa<AtomicExpr>(RetE)) return; 
+      // FVFIXME: What else can make its way here?
+      if (!isa<CallExpr>(RetE)) {
+        //RetE->dump();
+        return;
+      }
+      CallExpr *RetCE = cast<CallExpr>(RetE);
+      
+      if (S.getLangOpts().UFCStatsDumpAllCalls)
+        UFC_VecOfCallExprs.push_back(RetCE);
+
+      ++UFC_TotalNumOfNonDependentCallExprs;
+      if (RetCE->isTransposedCall()) {
+        ++UFC_NumOfTransposedCalls;
+        if (S.getLangOpts().isUFCWarnAboutTranspose()) {
+          S.Diag(RetCE->getLocStart(), diag::warn_ufc_function_call_transposed)
+              << RetCE->getSourceRange();
+          const NamedDecl *NamedCalleeDecl =
+              cast<NamedDecl>(RetCE->getCalleeDecl());
+          S.Diag(NamedCalleeDecl->getLocation(), diag::note_ufc_callee_decl)
+              << NamedCalleeDecl;
+        }
+      }
+    }
+  }
+};
+
 /// ActOnCallExpr - Handle a call to Fn with the specified array of arguments.
 /// This provides the location of the left/right parens and a list of comma
 /// locations.
 ExprResult
 Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
                     MultiExprArg ArgExprs, SourceLocation RParenLoc,
-                    Expr *ExecConfig, bool IsExecConfig) {
+                    Expr *ExecConfig, bool IsExecConfig,
+                    bool IsTransposingForUnifiedFunctionCall) {
   // Since this might be a postfix expression, get rid of ParenListExprs.
   ExprResult Result = MaybeConvertParenListExprToParenExpr(S, Fn);
-  if (Result.isInvalid()) return ExprError();
+
+  struct UFCAccountant UFCAccountant(*this, Result,
+                                     IsTransposingForUnifiedFunctionCall);
+
+  if (Result.isInvalid())
+    return Result = ExprError();
   Fn = Result.get();
+  Expr *NakedFn = Fn->IgnoreParens();
 
   if (checkArgsForPlaceholders(*this, ArgExprs))
-    return ExprError();
+    return Result = ExprError();
+  ASTBasedADLandUFCDeterminatorRAII AdlUfcRAII(*this, Fn);
+  const bool DiagnosticTrapEnabled =
+      ConsiderUFC.getValue() && !IsTransposingForUnifiedFunctionCall;
+  const bool AttemptUFC =
+      ConsiderUFC.getValue() && !IsTransposingForUnifiedFunctionCall;
+
+  const bool AlwaysTryMemberSyntaxFirst =
+      AttemptUFC && getLangOpts().isUFCFavorMember();
 
   if (getLangOpts().CPlusPlus) {
     // If this is a pseudo-destructor expression, build the call immediately.
@@ -4749,12 +4852,12 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
                                                 ArgExprs.back()->getLocEnd()));
       }
 
-      return new (Context)
+      return Result = new (Context)
           CallExpr(Context, Fn, None, Context.VoidTy, VK_RValue, RParenLoc);
     }
     if (Fn->getType() == Context.PseudoObjectTy) {
       ExprResult result = CheckPlaceholderExpr(Fn);
-      if (result.isInvalid()) return ExprError();
+      if (result.isInvalid()) return Result = ExprError();
       Fn = result.get();
     }
 
@@ -4770,28 +4873,157 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
 
     if (Dependent) {
       if (ExecConfig) {
-        return new (Context) CUDAKernelCallExpr(
+        return Result = new (Context) CUDAKernelCallExpr(
             Context, Fn, cast<CallExpr>(ExecConfig), ArgExprs,
             Context.DependentTy, VK_RValue, RParenLoc);
       } else {
-        return new (Context) CallExpr(
+        // Do oridinary lookup for the 'id' of interest, and cache it
+        
+        Expr *DefinitionCtxIDExpr = nullptr;
+        if (!IsTransposingForUnifiedFunctionCall && ConsiderUFC.getValue() &&
+            CurContext->isDependentContext()) {
+          bool IsMemberSyntax = false;
+          DeclarationNameInfo MemberNameInfo;
+          SourceLocation TemplateKWLoc;
+          const ASTTemplateArgumentListInfo *TemplateArgs = nullptr;
+          NestedNameSpecifierLoc NNSLoc;
+          if (auto *MemE =
+                  dyn_cast<CXXDependentScopeMemberExpr>(Fn->IgnoreParens())) {
+            IsMemberSyntax = true;
+            MemberNameInfo = MemE->getMemberNameInfo();
+            TemplateArgs = MemE->getOptionalExplicitTemplateArgs();
+            TemplateKWLoc = MemE->getTemplateKeywordLoc();
+            NNSLoc = MemE->getQualifierLoc();
+          } else if (auto *MemE = dyn_cast<UnresolvedMemberExpr>(Fn->IgnoreParens())) {
+            IsMemberSyntax = true;
+            MemberNameInfo =
+                DeclarationNameInfo(MemE->getName(), MemE->getNameLoc());
+            TemplateArgs = MemE->getOptionalExplicitTemplateArgs();
+            TemplateKWLoc = MemE->getTemplateKeywordLoc();
+            NNSLoc = MemE->getQualifierLoc();
+          } else if (auto *MemE = dyn_cast<MemberExpr>(Fn->IgnoreParens())) {
+            IsMemberSyntax = true;
+            MemberNameInfo = MemE->getMemberNameInfo();
+            TemplateArgs = MemE->getOptionalExplicitTemplateArgs();
+            TemplateKWLoc = MemE->getTemplateKeywordLoc();
+            NNSLoc = MemE->getQualifierLoc();
+          }
+
+          if (S && IsMemberSyntax) {
+            // Only works with identifiers, operator function ids
+            Optional<UnqualifiedId::IdKind> IdKind = [&] {
+              const DeclarationName &DN = MemberNameInfo.getName();
+              switch (DN.getNameKind()) {
+              case DeclarationName::Identifier:
+                return Optional<UnqualifiedId::IdKind>(
+                    UnqualifiedId::IK_Identifier);
+              case DeclarationName::CXXOperatorName:
+                return Optional<UnqualifiedId::IdKind>(
+                    UnqualifiedId::IK_OperatorFunctionId);
+
+              default:
+                return Optional<UnqualifiedId::IdKind>();
+              }
+            }();
+
+            if (IdKind.hasValue()) {
+
+              //SFINAETrap TrapDiagnostics(*this, true);
+              DiagnosticSuppresser TrapDiagnostics(*this);
+
+              CXXScopeSpec SS;
+              SS.Adopt(NNSLoc);
+              TemplateArgumentListInfo TemplateArgsLI;
+              if (TemplateArgs)
+                TemplateArgs->copyInto(TemplateArgsLI);
+              ExprResult NonADLLookupId = ActOnIdExpression(
+                  S, SS, TemplateKWLoc,
+                  TemplateArgs ? &TemplateArgsLI : nullptr, MemberNameInfo,
+                 IdKind.getValue(),
+                  /*HasTrailingLParen*/ ConsiderADL.getValue(),
+                  /*IsAddressOfOperand*/ false,
+                  /*CorrectionCandidateCallBack*/ nullptr,
+                  /*IsInlineASM*/ false,
+                  /*KeywordReplacement*/ nullptr);
+              if (NonADLLookupId.isUsable() &&
+                  !TrapDiagnostics.hasErrorOccurred()) {
+                DefinitionCtxIDExpr = NonADLLookupId.get();
+              }
+            }
+          }
+        }
+        auto *CE = new (Context) CallExpr(
             Context, Fn, ArgExprs, Context.DependentTy, VK_RValue, RParenLoc);
+        // FVTODO: Make this part of the constructor 
+        CE->setDefinitionContextLookupOfIdExpr(DefinitionCtxIDExpr);
+        return Result = CE;
       }
     }
-
+    
     // Determine whether this is a call to an object (C++ [over.call.object]).
-    if (Fn->getType()->isRecordType())
-      return BuildCallToObjectOfClassType(S, Fn, LParenLoc, ArgExprs,
-                                          RParenLoc);
-
+    if (Fn->getType()->isRecordType()) {
+      if (!AttemptUFC)
+        return Result = BuildCallToObjectOfClassType(S, Fn, LParenLoc, ArgExprs,
+                                            RParenLoc);
+      
+      
+      // If we are considering UFC, then try to build the call and if
+      // it fails, we shall try the other syntax
+      DiagnosticSuppresser TrapDiagnostics(*this);
+      if (AlwaysTryMemberSyntaxFirst && !isa<MemberExpr>(NakedFn)) {
+        ExprResult TransposedInvokable = TryBuildCallAsMemberFunction(
+              S, Fn, LParenLoc, ArgExprs, RParenLoc);
+          
+        if (TransposedInvokable.isUsable())
+          return Result = TransposedInvokable;
+      }
+      ExprResult TryInvokable =
+          BuildCallToObjectOfClassType(S, Fn, LParenLoc, ArgExprs, RParenLoc);
+      if (!TryInvokable.isUsable() || TrapDiagnostics.hasErrorOccurred()) {
+        ExprResult TransposedInvokable;
+        if (isa<MemberExpr>(NakedFn))
+          TransposedInvokable = TryBuildCallAsNonMemberFunction(
+              S, Fn, LParenLoc, ArgExprs, RParenLoc);
+        else if (!AlwaysTryMemberSyntaxFirst)
+          TransposedInvokable = TryBuildCallAsMemberFunction(
+              S, Fn, LParenLoc, ArgExprs, RParenLoc);
+          
+        if (TransposedInvokable.isUsable())
+          return Result = TransposedInvokable;
+      } 
+        
+      TrapDiagnostics.reportSuppressedDiagnostics();
+      return Result = TryInvokable;
+      
+    }
     if (Fn->getType() == Context.UnknownAnyTy) {
       ExprResult result = rebuildUnknownAnyFunction(*this, Fn);
-      if (result.isInvalid()) return ExprError();
+      if (result.isInvalid()) return Result = ExprError();
       Fn = result.get();
     }
 
     if (Fn->getType() == Context.BoundMemberTy) {
-      return BuildCallToMemberFunction(S, Fn, LParenLoc, ArgExprs, RParenLoc);
+      if (!AttemptUFC)
+        return Result = BuildCallToMemberFunction(
+                   S, Fn, LParenLoc, ArgExprs, RParenLoc,
+                   IsTransposingForUnifiedFunctionCall);
+      DiagnosticSuppresser TrapDiagnostics(*this, DiagnosticTrapEnabled);
+
+      ExprResult MemFunCallER =
+          BuildCallToMemberFunction(S, Fn, LParenLoc, ArgExprs, RParenLoc,
+                                    IsTransposingForUnifiedFunctionCall);
+      if (AttemptUFC &&
+          (!MemFunCallER.isUsable() || TrapDiagnostics.hasErrorOccurred()) &&
+          !(isa<BinaryOperator>(Fn->IgnoreParens()) ||
+            isa<CXXPseudoDestructorExpr>(Fn->IgnoreParens()))) {
+        //DiagnosticSuppresser InnerTrapDiagnostics(*this);
+        ExprResult ER = TryBuildCallAsNonMemberFunction(S, Fn, LParenLoc,
+                                                        ArgExprs, RParenLoc);
+        if (ER.isUsable())
+          return Result = ER;
+      }
+      TrapDiagnostics.reportSuppressedDiagnostics();
+      return Result = MemFunCallER;
     }
   }
 
@@ -4804,24 +5036,72 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
       OverloadExpr *ovl = find.Expression;
       if (isa<UnresolvedLookupExpr>(ovl)) {
         UnresolvedLookupExpr *ULE = cast<UnresolvedLookupExpr>(ovl);
-        return BuildOverloadedCallExpr(S, Fn, ULE, LParenLoc, ArgExprs,
-                                       RParenLoc, ExecConfig);
+        if (!AttemptUFC)
+          return Result = BuildOverloadedCallExpr(
+              S, Fn, ULE, LParenLoc, ArgExprs, RParenLoc, ExecConfig,
+              /*AllowTypoCorrection*/ !IsTransposingForUnifiedFunctionCall,
+              IsTransposingForUnifiedFunctionCall);
+        
+        DiagnosticSuppresser TrapDiagnostics(*this, DiagnosticTrapEnabled);
+
+        if (AlwaysTryMemberSyntaxFirst && ArgExprs.size()) {
+          ExprResult ER = TryBuildCallAsMemberFunction(S, Fn, LParenLoc,
+                                                       ArgExprs, RParenLoc);
+          if (ER.isUsable())
+            return Result = ER;
+         
+        }
+
+        ExprResult OvlResolvedCallExpr = BuildOverloadedCallExpr(
+            S, Fn, ULE, LParenLoc, ArgExprs, RParenLoc, ExecConfig,
+            /*AllowTypoCorrection*/ !IsTransposingForUnifiedFunctionCall,
+            IsTransposingForUnifiedFunctionCall);
+        if (AttemptUFC && (!OvlResolvedCallExpr.isUsable() ||
+                           TrapDiagnostics.hasErrorOccurred()) &&
+            ArgExprs.size() && !AlwaysTryMemberSyntaxFirst) {
+          // DiagnosticSuppresser InnerTrapDiagnostics(*this);
+          ExprResult ER = TryBuildCallAsMemberFunction(S, Fn, LParenLoc,
+                                                       ArgExprs, RParenLoc);
+          if (ER.isUsable())
+            return Result = ER;
+        }
+        TrapDiagnostics.reportSuppressedDiagnostics();
+        return Result = OvlResolvedCallExpr;
       } else {
-        return BuildCallToMemberFunction(S, Fn, LParenLoc, ArgExprs,
-                                         RParenLoc);
-      }
+        if (!AttemptUFC)
+          return Result = BuildCallToMemberFunction(
+                     S, Fn, LParenLoc, ArgExprs, RParenLoc,
+                     IsTransposingForUnifiedFunctionCall);
+
+        DiagnosticSuppresser TrapDiagnostics(*this, DiagnosticTrapEnabled);
+
+        ExprResult MemFunCallER =
+            BuildCallToMemberFunction(S, Fn, LParenLoc, ArgExprs, RParenLoc,
+                                      IsTransposingForUnifiedFunctionCall);
+        if (AttemptUFC &&
+            (!MemFunCallER.isUsable() || TrapDiagnostics.hasErrorOccurred()) &&
+            !(isa<BinaryOperator>(Fn->IgnoreParens()) ||
+              isa<CXXPseudoDestructorExpr>(Fn->IgnoreParens()))) {
+          //DiagnosticSuppresser InnerTrapDiagnostics(*this);
+          ExprResult ER = TryBuildCallAsNonMemberFunction(S, Fn, LParenLoc,
+                                                          ArgExprs, RParenLoc);
+          if (ER.isUsable())
+            return Result = ER;
+        }
+        TrapDiagnostics.reportSuppressedDiagnostics();
+        return Result = MemFunCallER;
+      } 
     }
   }
 
   // If we're directly calling a function, get the appropriate declaration.
   if (Fn->getType() == Context.UnknownAnyTy) {
     ExprResult result = rebuildUnknownAnyFunction(*this, Fn);
-    if (result.isInvalid()) return ExprError();
+    if (result.isInvalid()) return Result = ExprError();
     Fn = result.get();
   }
 
-  Expr *NakedFn = Fn->IgnoreParens();
-
+  
   NamedDecl *NDecl = nullptr;
   if (UnaryOperator *UnOp = dyn_cast<UnaryOperator>(NakedFn))
     if (UnOp->getOpcode() == UO_AddrOf)
@@ -4860,9 +5140,46 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
       }
     }
   }
+  // If we are attempting to call an invokable data member, or a global lambda
+  // or fptr check to see if it is invokable with the current arguments, and if
+  // not then try non-member syntax.
 
-  return BuildResolvedCallExpr(Fn, NDecl, LParenLoc, ArgExprs, RParenLoc,
-                               ExecConfig, IsExecConfig);
+  if (AttemptUFC) {
+    // If we are considering UFC, either try the member syntax first, or try to
+    // build resolved call expr, and if it fails, we shall try the other syntax
+    DiagnosticSuppresser TrapDiagnostics(*this);
+    assert(!isa<UnresolvedMemberExpr>(NakedFn) &&
+           "How is an unresolved member expr getting here?");
+    // Only try member access, if we didn't explicitly write it.
+    if (AlwaysTryMemberSyntaxFirst && !dyn_cast_or_null<FieldDecl>(NDecl) &&
+        !(isa<MemberExpr>(NakedFn) &&
+          !cast<MemberExpr>(NakedFn)->isImplicitAccess())) {
+      ExprResult ER =
+          TryBuildCallAsMemberFunction(S, Fn, LParenLoc, ArgExprs, RParenLoc);
+      if (ER.isUsable())
+        return Result = ER;
+    }
+    
+    ExprResult TryInvokable = BuildResolvedCallExpr(
+        Fn, NDecl, LParenLoc, ArgExprs, RParenLoc, ExecConfig, IsExecConfig);
+    if (!TryInvokable.isUsable() || TrapDiagnostics.hasErrorOccurred()) {
+      ExprResult TransposedInvokable;
+      if (NDecl && isa<FieldDecl>(NDecl))
+        TransposedInvokable = TryBuildCallAsNonMemberFunction(
+          S, Fn, LParenLoc, ArgExprs, RParenLoc);
+      else if (!AlwaysTryMemberSyntaxFirst) {
+        TransposedInvokable = TryBuildCallAsMemberFunction(
+          S, Fn, LParenLoc, ArgExprs, RParenLoc);
+      }
+      if (TransposedInvokable.isUsable())
+        return Result = TransposedInvokable;
+    } 
+    TrapDiagnostics.reportSuppressedDiagnostics();
+    return Result = TryInvokable;
+  }
+
+  return Result = BuildResolvedCallExpr(Fn, NDecl, LParenLoc, ArgExprs,
+                                        RParenLoc, ExecConfig, IsExecConfig);
 }
 
 /// ActOnAsTypeExpr - create a new asType (bitcast) from the arguments.
@@ -10752,7 +11069,19 @@ ExprResult Sema::BuildUnaryOp(Scope *S, SourceLocation OpLoc,
          pty->getKind() == BuiltinType::UnknownAny ||
          pty->getKind() == BuiltinType::BoundMember))
       return CreateBuiltinUnaryOp(OpLoc, Opc, Input);
-
+    // Since unified function call can allow idexpressions that wouldn't
+    // otherwise be considered unresolved lookup exprs - but missing identifiers
+    // - lets omit an identifier not found error vs an unresolved overload
+    // expression error if we are applying a unary operator to an identifier
+    // that is not followed by a left paren.
+    if (UnresolvedLookupExpr *ULE =
+            dyn_cast<UnresolvedLookupExpr>(Input->IgnoreParens())) {
+      if (!ULE->getNumDecls() && getLangOpts().isUnifiedFunctionCallEnabled()) {
+        // FIXME: Call Diagnose empty lookup
+        Diag(ULE->getNameLoc(), diag::err_undeclared_var_use) << ULE->getName();
+        return ExprError();
+      }
+    }
     // Anything else needs to be handled now.
     ExprResult Result = CheckPlaceholderExpr(Input);
     if (Result.isInvalid()) return ExprError();
@@ -13459,6 +13788,7 @@ void Sema::MarkDeclarationsReferencedInExpr(Expr *E,
 /// during overload resolution or within sizeof/alignof/typeof/typeid.
 bool Sema::DiagRuntimeBehavior(SourceLocation Loc, const Stmt *Statement,
                                const PartialDiagnostic &PD) {
+  
   switch (ExprEvalContexts.back().Context) {
   case Unevaluated:
   case UnevaluatedAbstract:
@@ -13472,8 +13802,16 @@ bool Sema::DiagRuntimeBehavior(SourceLocation Loc, const Stmt *Statement,
   case PotentiallyEvaluated:
   case PotentiallyEvaluatedIfUsed:
     if (Statement && getCurFunctionOrMethodDecl()) {
-      FunctionScopes.back()->PossiblyUnreachableDiags.
-        push_back(sema::PossiblyUnreachableDiag(PD, Loc, Statement));
+      if (!getDiagnostics().getSuppressAllDiagnostics()) {
+        // FVFIXME: store the function scope info and the unrachable diagnostic
+        // for that function scope into a container.
+        FunctionScopes.back()->PossiblyUnreachableDiags.push_back(
+            sema::PossiblyUnreachableDiag(PD, Loc, Statement));
+      } else {
+        FunctionScopeInfo *FSI = FunctionScopes.back();
+        SuppressedPossiblyUnreachableDiags.push_back(std::make_pair(
+            FSI, sema::PossiblyUnreachableDiag(PD, Loc, Statement)));
+      }
     }
     else
       Diag(Loc, PD);

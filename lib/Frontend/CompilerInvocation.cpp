@@ -1545,6 +1545,22 @@ static void ParseLangArgs(LangOptions &Opts, ArgList &Args, InputKind IK,
   Opts.AssumeSaneOperatorNew = !Args.hasArg(OPT_fno_assume_sane_operator_new);
   Opts.SizedDeallocation = Args.hasArg(OPT_fsized_deallocation);
   Opts.ConceptsTS = Args.hasArg(OPT_fconcepts_ts);
+
+  // The default unified function call option is option 4 - favor non-member
+  // functions for f(x, y) and favor member function for x.f(y)
+  Opts.UFCFavorAsWritten =
+      Opts.CPlusPlus &&
+      (Args.hasArg(OPT_fufc) || Args.hasArg(OPT_fufc_favor_as_written));
+  Opts.UFCFavorMember =
+      Opts.CPlusPlus && Args.hasArg(OPT_fufc_favor_member);
+  const bool UFCisOn = (Opts.UFCFavorAsWritten || Opts.UFCFavorMember);
+  Opts.UFCWarnAboutTranspose = UFCisOn && Args.hasArg(OPT_fufc_warn);
+  Opts.UFCTreatObjectWithArrowOpAsPointer =
+      UFCisOn && Args.hasArg(OPT_fufc_arrowobj_as_ptr);
+  Opts.UFCStats = UFCisOn && Args.hasArg(OPT_fufc_stats);
+  Opts.UFCStatsDumpAllCalls =
+      Opts.UFCStats && Args.hasArg(OPT_fufc_stats_dump_all_calls);
+
   Opts.HeinousExtensions = Args.hasArg(OPT_fheinous_gnu_extensions);
   Opts.AccessControl = !Args.hasArg(OPT_fno_access_control);
   Opts.ElideConstructors = !Args.hasArg(OPT_fno_elide_constructors);

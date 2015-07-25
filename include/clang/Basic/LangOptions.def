@@ -169,6 +169,14 @@ LANGOPT(CUDADisableTargetCallChecks, 1, 0, "Disable checks for call targets (hos
 LANGOPT(AssumeSaneOperatorNew , 1, 1, "implicit __attribute__((malloc)) for C++'s new operators")
 LANGOPT(SizedDeallocation , 1, 0, "enable sized deallocation functions")
 LANGOPT(ConceptsTS , 1, 0, "enable C++ Extensions for Concepts")
+
+LANGOPT(UFCFavorAsWritten , 1, 0, "enable C++ unifed-function-call favoring as written syntax (i.e. N4474 - option 4)")
+LANGOPT(UFCFavorMember , 1, 0, "enable C++ unifed-function-call favoring member syntax (i.e. N4474 - option 6)")
+LANGOPT(UFCWarnAboutTranspose , 1, 0, "if unified-function-call is enabled, emit a warning for each transposed call")
+LANGOPT(UFCTreatObjectWithArrowOpAsPointer , 1, 0, "if unified-function-call is enabled, and a class has the arrow operator defined, treat it as a pointer")
+LANGOPT(UFCStats , 1, 0, "if unified-function-call is enabled, dump stats about the number of calls transposed")
+LANGOPT(UFCStatsDumpAllCalls, 1, 0, "if unified-function-call stats are on, dump all calls")
+
 BENIGN_LANGOPT(ElideConstructors , 1, 1, "C++ copy constructor elision")
 BENIGN_LANGOPT(DumpRecordLayouts , 1, 0, "dumping the layout of IRgen'd records")
 BENIGN_LANGOPT(DumpRecordLayoutsSimple , 1, 0, "dumping the layout of IRgen'd records in a simple form")

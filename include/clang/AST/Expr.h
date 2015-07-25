@@ -2159,7 +2159,7 @@ public:
   }
 };
 
-
+class UnresolvedLookupExpr; 
 /// CallExpr - Represents a function call (C99 6.5.2.2, C++ [expr.call]).
 /// CallExpr itself represents a normal function call, e.g., "f(x, 2)",
 /// while its subclasses may represent alternative syntax that (semantically)
@@ -2171,6 +2171,21 @@ class CallExpr : public Expr {
   Stmt **SubExprs;
   unsigned NumArgs;
   SourceLocation RParenLoc;
+  
+  // If IsTransposedCall is true, then if this complete object is 
+  //  - a CallExpr f(x, y) it was originally written as 
+  //    a CXXMemberCallExpr x.f(y)
+  //  - or if a CXXMemberCallExpr x.f(y), it was originally written as 
+  //    a CallExpr f(x, y)
+  bool IsTransposedCall : 1;
+  // Contains an unresolved lookup expression computed at definition context of
+  // a template used when transposing calls from member syntax to non-member
+  // syntax within templates.
+
+  // FVFIXME: Since this information is optional, we should be able to roll this
+  // creatively within SubExprs (such as after all arguments), and use the
+  // IsTransposedCall bit perhaps to inform?
+  Expr *DefinitionContextLookupOfIdExpr;
 
 protected:
   // These versions of the constructor are for derived classes.
@@ -2299,6 +2314,23 @@ public:
 
   SourceLocation getRParenLoc() const { return RParenLoc; }
   void setRParenLoc(SourceLocation L) { RParenLoc = L; }
+
+  bool isTransposedCall() const { return IsTransposedCall; }
+  void setIsTransposedCall() { IsTransposedCall = true; }
+
+  void setDefinitionContextLookupOfIdExpr(Expr *E) {
+    DefinitionContextLookupOfIdExpr = E;
+  }
+  // Used for unified function call 
+  Expr *getDefinitionContextLookupOfIdExpr() const {
+    return DefinitionContextLookupOfIdExpr;
+  }
+  DeclRefExpr *getDefinitionContextLookupOfIdAsResolvedExpr() const {
+    return dyn_cast_or_null<DeclRefExpr>(DefinitionContextLookupOfIdExpr);
+  }
+
+  UnresolvedLookupExpr *
+  getDefinitionContextLookupOfIdAsUnresolvedExpr() const; 
 
   SourceLocation getLocStart() const LLVM_READONLY;
   SourceLocation getLocEnd() const LLVM_READONLY;
@@ -4970,7 +5002,9 @@ public:
              /*containsUnexpandedParameterPack*/ false) {
     assert(T->isDependentType() && "TypoExpr given a non-dependent type");
   }
-
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == TypoExprClass;
+  }
   child_range children() {
     return child_range(child_iterator(), child_iterator());
   }

@@ -23,10 +23,15 @@
 #include "clang/Sema/Sema.h"
 #include "clang/Sema/SemaConsumer.h"
 #include "llvm/Support/CrashRecoveryContext.h"
+#include "llvm/Support/Format.h"
 #include <cstdio>
 #include <memory>
 
 using namespace clang;
+
+extern unsigned UFC_TotalNumOfNonDependentCallExprs;
+extern unsigned UFC_NumOfTransposedCalls;
+extern std::vector<CallExpr *> UFC_VecOfCallExprs;
 
 namespace {
 
@@ -159,4 +164,35 @@ void clang::ParseAST(Sema &S, bool PrintStats, bool SkipFunctionBodies) {
     Stmt::PrintStats();
     Consumer->PrintStats();
   }
+  if (S.getLangOpts().isUFCStatsOn()) {
+    std::string UFCType = "Option 4 (favor as-written syntax)";
+    if (S.getLangOpts().isUFCFavorMember())
+      UFCType = "Option 6 (favor member-syntax)";
+         
+    llvm::errs() << "\nUFC STATISTICS:\n";
+    llvm::errs() << "Using " << UFCType.c_str() << "\n";
+    llvm::errs() << "\nTotal Number of Calls: " << UFC_TotalNumOfNonDependentCallExprs;
+    llvm::errs() << "\nNumer of Transposed Calls: " << UFC_NumOfTransposedCalls;
+    llvm::errs() << "\nPercentage of Calls transposed: "
+                 << llvm::format("%.2f",(UFC_NumOfTransposedCalls * 100.00) /
+                        UFC_TotalNumOfNonDependentCallExprs) << "%\n\n";
+    if (S.getLangOpts().UFCStatsDumpAllCalls) {
+      int I = 0;
+      for (auto *RetCE : UFC_VecOfCallExprs) {
+
+        if (!I++) {
+          S.Diag(SourceLocation(), diag::warn_ufc_printing_call_exprs);
+        }
+        S.Diag(RetCE->getLocStart(), diag::note_ufc_print_call_expr)
+            << (RetCE->isTransposedCall() ? 1 : 0);
+      }
+    }
+  }
 }
+
+
+// Remove the following two lines. If you see this, its 
+// because I mistakenly committed these debugging related
+// changes.
+#define DONT_USE_ANON_FV
+#include "F:\clang-fv\my-code\fv_debug.cpp"

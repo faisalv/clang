@@ -1386,7 +1386,8 @@ Parser::TryAnnotateName(bool IsAddressOfOperand,
   }
 
   Token Next = NextToken();
-
+  TokenBasedADLandUFCDeterminatorRAII AdlUfcRAII(*this, /*SkipCurToken*/ true,
+                                                 SS);
   // Look up and classify the identifier. We don't perform any typo-correction
   // after a scope specifier, because in general we can't recover from typos
   // there (eg, after correcting 'A::tempalte B<X>::C' [sic], we would need to
@@ -1394,7 +1395,7 @@ Parser::TryAnnotateName(bool IsAddressOfOperand,
   Sema::NameClassification Classification = Actions.ClassifyName(
       getCurScope(), SS, Name, NameLoc, Next, IsAddressOfOperand,
       SS.isEmpty() ? std::move(CCC) : nullptr);
-
+  AdlUfcRAII.reset();
   switch (Classification.getKind()) {
   case Sema::NC_Error:
     return ANK_Error;

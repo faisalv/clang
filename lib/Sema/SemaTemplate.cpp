@@ -2853,6 +2853,8 @@ ExprResult Sema::BuildTemplateIdExpr(const CXXScopeSpec &SS,
                                      LookupResult &R,
                                      bool RequiresADL,
                                  const TemplateArgumentListInfo *TemplateArgs) {
+  
+  
   // FIXME: Can we do any checking at this point? I guess we could check the
   // template arguments that we have against the template name, if the template
   // name refers to a single template. That's not a terribly common case,
@@ -2864,9 +2866,10 @@ ExprResult Sema::BuildTemplateIdExpr(const CXXScopeSpec &SS,
   //       vs template<class T, class U> void f(U);
 
   // These should be filtered out by our callers.
-  assert(!R.empty() && "empty lookup results when building templateid");
+  assert((!R.empty() || getLangOpts().isUnifiedFunctionCallEnabled()) &&
+         "empty lookup results when building templateid");
   assert(!R.isAmbiguous() && "ambiguous lookup when building templateid");
-
+  if (R.empty()) return ExprError();
   // In C++1y, check variable template ids.
   bool InstantiationDependent;
   if (R.getAsSingle<VarTemplateDecl>() &&

@@ -16,6 +16,7 @@
 #define LLVM_CLANG_SEMA_SEMAINTERNAL_H
 
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/ExprCXX.h"
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Sema.h"
 #include "clang/Sema/SemaDiagnostic.h"
@@ -340,6 +341,156 @@ inline Sema::TypoExprState &Sema::TypoExprState::operator=(
   RecoveryHandler = std::move(other.RecoveryHandler);
   return *this;
 }
+
+// Determine whether the passed in callee-expr, based on whether there is a
+// scope-specifier or the number of parentheses surrounding the CalleeExpr,
+// whether ADL or UFC are disabled.
+struct ASTBasedADLandUFCDeterminatorRAII {
+  Optional<bool> PrevADL;
+  Optional<bool> PrevUFC;
+  Sema &S;
+  ASTBasedADLandUFCDeterminatorRAII(Sema &S, Expr *CalleeExpr)
+      : PrevADL(S.ConsiderADL), PrevUFC(S.ConsiderUFC), S(S) {
+    
+    NestedNameSpecifierLoc NNSLoc;
+    // check if there is a scope specifier - and if so, disable both.
+    if (auto *E =
+            dyn_cast<CXXDependentScopeMemberExpr>(CalleeExpr->IgnoreParens())) {
+      NNSLoc = E->getQualifierLoc();
+    } else if (auto *E =
+                   dyn_cast<UnresolvedMemberExpr>(CalleeExpr->IgnoreParens())) {
+      NNSLoc = E->getQualifierLoc();
+    } else if (auto *E = dyn_cast<MemberExpr>(CalleeExpr->IgnoreParens())) {
+      NNSLoc = E->getQualifierLoc();
+    } else if (auto *E = dyn_cast<UnresolvedLookupExpr>(CalleeExpr->IgnoreParens())) {
+      NNSLoc = E->getQualifierLoc();
+    } else if (auto *E = dyn_cast<DependentScopeDeclRefExpr>(CalleeExpr->IgnoreParens())) {
+      NNSLoc = E->getQualifierLoc();
+    } else if (auto *E = dyn_cast<DeclRefExpr>(CalleeExpr->IgnoreParens())) {
+      NNSLoc = E->getQualifierLoc();
+    } /*else {
+     
+      CalleeExpr->dump();
+      llvm_unreachable("What is the type of this callee???!");
+    }
+    */
+    if (NNSLoc.hasQualifier()) {
+      S.ConsiderADL = false;
+      S.ConsiderUFC = false;
+      return;
+    }
+    const int NumParens = getNumOfSurroundingParens(CalleeExpr);
+    S.ConsiderADL =
+        NumParens == 0 ||
+        (S.getLangOpts().isUnifiedFunctionCallEnabled() && NumParens == 2);
+    S.ConsiderUFC =
+        S.getLangOpts().isUnifiedFunctionCallEnabled() && NumParens < 2;
+  }
+  ~ASTBasedADLandUFCDeterminatorRAII() {
+    S.ConsiderADL = PrevADL;
+    S.ConsiderUFC = PrevUFC;
+  }
+
+  static int getNumOfSurroundingParens(Expr *E) {
+    int N = 0;
+    while (isa<ParenExpr>(E)) {
+      ++N;
+      E = cast<ParenExpr>(E)->getSubExpr();
+    }
+    return N;
+  }
+};
+
+
+
+class DiagnosticSuppresser : private DiagnosticErrorTrap {
+  Sema &S;
+  const bool PrevSuppressed;
+  bool Enabled;
+  std::vector<StoredDiagnostic> PrevSuppressedDiagnostics;
+  decltype(std::declval<Sema>().SuppressedPossiblyUnreachableDiags)
+      PrevSuppressedPossiblyUnreachableDiags;
+  DiagnosticSuppresser *PrevDiagnosticSuppresser;
+
+  // FVTODO: Add a flag in the diagnostic engine to only store suppressed
+  // diagnostics if the flag to store is set.
+public:
+  DiagnosticSuppresser(Sema &S, bool Enabled = true)
+      : DiagnosticErrorTrap(S.getDiagnostics()), S(S),
+        PrevSuppressed(S.getDiagnostics().getSuppressAllDiagnostics()),
+        Enabled(Enabled),
+        PrevDiagnosticSuppresser(S.getDiagnostics().CurDiagnosticSuppresser) {
+    if (!Enabled)
+      return;
+    S.getDiagnostics().setSuppressAllDiagnostics(true);
+    S.getDiagnostics().SuppressedDiagnostics.swap(PrevSuppressedDiagnostics);
+    S.SuppressedPossiblyUnreachableDiags.swap(
+        PrevSuppressedPossiblyUnreachableDiags);
+    S.getDiagnostics().CurDiagnosticSuppresser = this;
+  }
+  DiagnosticSuppresser *getPrevDiagnosticSuppresser() const {
+    return PrevDiagnosticSuppresser;
+  }
+  void disable() {
+    if (!Enabled) return;
+    S.getDiagnostics().setSuppressAllDiagnostics(PrevSuppressed);
+    S.getDiagnostics().SuppressedDiagnostics.swap(PrevSuppressedDiagnostics);
+    S.SuppressedPossiblyUnreachableDiags.swap(
+        PrevSuppressedPossiblyUnreachableDiags);
+    S.getDiagnostics().CurDiagnosticSuppresser = PrevDiagnosticSuppresser;
+    Enabled = false;
+  }
+  void reportSuppressedDiagnostics() {
+    
+    if (!Enabled) return;
+    // First transfer the suppressed unreachable diagnostics that get vetted at the
+    // end of the function body analysis, into the FunctionScopeInfo.
+    S.getDiagnostics().setSuppressAllDiagnostics(false);
+    for (std::pair<sema::FunctionScopeInfo *,
+                   sema::PossiblyUnreachableDiag> &UDP :
+         S.SuppressedPossiblyUnreachableDiags) {
+      assert(UDP.first == S.FunctionScopes.back() &&
+             "The unreachable diagnostics must involve the function scope "
+             "currently atop the stack");
+      UDP.first->PossiblyUnreachableDiags.push_back(UDP.second);
+    }
+
+    // Report the suppressed diagnostics
+    auto &D = S.getDiagnostics();
+    for (StoredDiagnostic &StoredDiag : S.getDiagnostics().SuppressedDiagnostics) {
+      if (StoredDiag.getLevel() != DiagnosticsEngine::Ignored)
+        S.getDiagnostics().Report(StoredDiag);
+    }
+
+    if (hasErrorOccurred())
+      D.ErrorOccurred = true;
+    if (hasUnrecoverableErrorOccurred())
+      D.UnrecoverableErrorOccurred = true;
+    if (hasUncompilableErrorOccurred())
+      D.UncompilableErrorOccurred = true;
+    if (hasFatalErrorOccurred())
+      D.FatalErrorOccurred = true;
+    D.NumErrors += (D.TrapNumErrorsOccurred - NumErrors); 
+    
+    disable();
+  }
+  ~DiagnosticSuppresser() {
+    disable();
+  }
+  bool hasErrorOccurred() const {
+    return DiagnosticErrorTrap::hasErrorOccurred(); // ||     S.NumSFINAEErrors > PrevSFINAEErrors;
+  }
+  
+  /// \brief The last template from which a template instantiation
+  /// error or warning was produced.
+  ///
+  /// This value is used to suppress printing of redundant template
+  /// instantiation backtraces when there are multiple errors in the
+  /// same instantiation. FIXME: Does this belong in Sema? It's tough
+  /// to implement it anywhere else.
+  Sema::ActiveTemplateInstantiation LastTemplateInstantiationErrorContext;
+
+}; 
 
 } // end namespace clang
 

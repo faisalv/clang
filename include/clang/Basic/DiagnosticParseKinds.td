@@ -567,6 +567,13 @@ def warn_cxx98_compat_literal_operator : Warning<
   "literal operators are incompatible with C++98">,
   InGroup<CXX98Compat>, DefaultIgnore;
 
+// C++ unified function call statistics
+def warn_ufc_printing_call_exprs : Warning<
+  "printing all function call expressions">,
+  InGroup<DiagGroup<"ufc-stats">>;
+def note_ufc_print_call_expr : Note<
+  "call expr was %select{NOT transposed|TRANSPOSED}0">;
+
 // Classes.
 def err_anon_type_definition : Error<
   "declaration of anonymous %0 must be a definition">;

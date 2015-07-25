@@ -33,6 +33,7 @@
 #include "llvm/ADT/SmallVector.h"
 using namespace clang;
 
+
 /// \brief Simple precedence-based parser for binary/ternary operators.
 ///
 /// Note: we diverge from the C99 grammar when parsing the assignment-expression
@@ -732,9 +733,13 @@ ExprResult Parser::ParseCastExpression(bool isUnaryExpression,
     break;
 
   case tok::kw_true:
-  case tok::kw_false:
-    return ParseCXXBoolLiteral();
-  
+  case tok::kw_false: {
+    Res = ParseCXXBoolLiteral();
+    if (!getLangOpts().isUnifiedFunctionCallEnabled())
+      return Res;
+    break;
+  }
+
   case tok::kw___objc_yes:
   case tok::kw___objc_no:
       return ParseObjCBoolLiteral();
@@ -953,6 +958,9 @@ ExprResult Parser::ParseCastExpression(bool isUnaryExpression,
       Validator->WantRemainingKeywords = Tok.isNot(tok::r_paren);
     }
     Name.setIdentifier(&II, ILoc);
+
+    TokenBasedADLandUFCDeterminatorRAII AdlUfcRAII(
+        *this, /*SkipCurToken*/ false, ScopeSpec);
     Res = Actions.ActOnIdExpression(
         getCurScope(), ScopeSpec, TemplateKWLoc, Name, Tok.is(tok::l_paren),
         isAddressOfOperand, std::move(Validator),
@@ -1608,11 +1616,14 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
         LHS = ExprError();
       }
       
-      if (!LHS.isInvalid())
+      if (!LHS.isInvalid()) {
+        TokenBasedADLandUFCDeterminatorRAII AdlUfcRAII(
+            *this, /*SkipCurToken*/ false, SS);
         LHS = Actions.ActOnMemberAccessExpr(getCurScope(), LHS.get(), OpLoc, 
                                             OpKind, SS, TemplateKWLoc, Name,
                                  CurParsedObjCImpl ? CurParsedObjCImpl->Dcl
                                                    : nullptr);
+      }
       break;
     }
     case tok::plusplus:    // postfix-expression: postfix-expression '++'

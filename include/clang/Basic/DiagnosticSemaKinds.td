@@ -2647,6 +2647,12 @@ def warn_impcast_objective_c_literal_to_bool : Warning<
     "evaluates to true">,
     InGroup<ObjCLiteralConversion>;
 
+// Diagnostics as part of unified function call
+def warn_ufc_function_call_transposed : Warning<
+    "function call transposed (ufc)">,
+    InGroup<DiagGroup<"ufc-call-transposed">>;
+def note_ufc_callee_decl : Note<"call resolved to %0 declared here">;
+
 def warn_cast_align : Warning<
   "cast from %0 to %1 increases required alignment from %2 to %3">,
   InGroup<CastAlign>, DefaultIgnore;

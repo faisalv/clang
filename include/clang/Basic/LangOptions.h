@@ -134,6 +134,13 @@ public:
   /// \brief Reset all of the options that are not considered when building a
   /// module.
   void resetNonModularOptions();
+  bool isUnifiedFunctionCallEnabled() const;
+  bool isUFCOverloadDiagsOn() const;
+  bool isUFCWarnAboutTranspose() const;
+  bool isUFCTreatObjectWithArrowAsPointer() const;
+  bool isUFCFavorAsWritten() const;
+  bool isUFCFavorMember() const;
+  bool isUFCStatsOn() const;
 };
 
 /// \brief Floating point control options

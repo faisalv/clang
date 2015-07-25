@@ -20,6 +20,31 @@ LangOptions::LangOptions() {
 #include "clang/Basic/LangOptions.def"
 }
 
+bool LangOptions::isUnifiedFunctionCallEnabled() const {
+  return CPlusPlus && (UFCFavorAsWritten ||
+         UFCFavorMember);
+}
+
+bool LangOptions::isUFCWarnAboutTranspose() const {
+  return UFCWarnAboutTranspose;
+}
+
+bool LangOptions::isUFCFavorAsWritten() const {
+    return UFCFavorAsWritten;
+  }
+bool LangOptions::isUFCFavorMember() const {
+    return //isUnifiedFunctionCallEnabled();
+     UFCFavorMember;
+}
+bool LangOptions::isUFCTreatObjectWithArrowAsPointer() const {
+  return 
+    UFCTreatObjectWithArrowOpAsPointer;
+}
+
+bool LangOptions::isUFCStatsOn() const {
+  return UFCStats;
+}
+
 void LangOptions::resetNonModularOptions() {
 #define LANGOPT(Name, Bits, Default, Description)
 #define BENIGN_LANGOPT(Name, Bits, Default, Description) Name = Default;

@@ -6544,12 +6544,12 @@ void Sema::AddSurrogateCandidate(CXXConversionDecl *Conversion,
   }
 }
 
-/// \brief Add overload candidates for overloaded operators that are
-/// member functions.
+/// \brief Add overload candidates for overloaded operators that are member
+/// functions.
 ///
-/// Add the overloaded operator candidates that are member functions
-/// for the operator Op that was used in an operator expression such
-/// as "x Op y". , Args/NumArgs provides the operator arguments, and
+/// Add the overloaded operator candidates that are member functions for the
+/// operator Op that was used in an operator expression such as "x Op y". ,
+/// Args/NumArgs provides the operator arguments, and
 /// CandidateSet will store the added overload candidates. (C++
 /// [over.match.oper]).
 void Sema::AddMemberOperatorCandidates(OverloadedOperatorKind Op,
@@ -6558,7 +6558,6 @@ void Sema::AddMemberOperatorCandidates(OverloadedOperatorKind Op,
                                        OverloadCandidateSet& CandidateSet,
                                        SourceRange OpRange) {
   DeclarationName OpName = Context.DeclarationNames.getCXXOperatorName(Op);
-
   // C++ [over.match.oper]p3:
   //   For a unary operator @ with an operand of a type whose
   //   cv-unqualified version is T1, and for a binary operator @ with
@@ -10773,11 +10772,14 @@ static ExprResult FinishOverloadedCallExpr(Sema &SemaRef, Scope *S, Expr *Fn,
                                            OverloadCandidateSet *CandidateSet,
                                            OverloadCandidateSet::iterator *Best,
                                            OverloadingResult OverloadResult,
-                                           bool AllowTypoCorrection) {
-  if (CandidateSet->empty())
+                                           bool AllowTypoCorrection, bool IsTransposingCallForUFC) {
+  if (CandidateSet->empty()) {
+    if (IsTransposingCallForUFC) return ExprError();
+
     return BuildRecoveryCallExpr(SemaRef, S, Fn, ULE, LParenLoc, Args,
                                  RParenLoc, /*EmptyLookup=*/true,
                                  AllowTypoCorrection);
+  }
 
   switch (OverloadResult) {
   case OR_Success: {
@@ -10791,15 +10793,15 @@ static ExprResult FinishOverloadedCallExpr(Sema &SemaRef, Scope *S, Expr *Fn,
   }
 
   case OR_No_Viable_Function: {
-    // Try to recover by looking for viable functions which the user might
-    // have meant to call.
-    ExprResult Recovery = BuildRecoveryCallExpr(SemaRef, S, Fn, ULE, LParenLoc,
-                                                Args, RParenLoc,
-                                                /*EmptyLookup=*/false,
-                                                AllowTypoCorrection);
-    if (!Recovery.isInvalid())
-      return Recovery;
-
+    if (!IsTransposingCallForUFC) {
+      // Try to recover by looking for viable functions which the user might
+      // have meant to call.
+      ExprResult Recovery =
+          BuildRecoveryCallExpr(SemaRef, S, Fn, ULE, LParenLoc, Args, RParenLoc,
+                                /*EmptyLookup=*/false, AllowTypoCorrection);
+      if (!Recovery.isInvalid())
+        return Recovery;
+    }
     SemaRef.Diag(Fn->getLocStart(),
          diag::err_ovl_no_viable_function_in_call)
       << ULE->getName() << Fn->getSourceRange();
@@ -10820,7 +10822,7 @@ static ExprResult FinishOverloadedCallExpr(Sema &SemaRef, Scope *S, Expr *Fn,
       << SemaRef.getDeletedOrUnavailableSuffix((*Best)->Function)
       << Fn->getSourceRange();
     CandidateSet->NoteCandidates(SemaRef, OCD_AllCandidates, Args);
-
+    if (IsTransposingCallForUFC) return ExprError();
     // We emitted an error for the unvailable/deleted function call but keep
     // the call in the AST.
     FunctionDecl *FDecl = (*Best)->Function;
@@ -10846,7 +10848,8 @@ ExprResult Sema::BuildOverloadedCallExpr(Scope *S, Expr *Fn,
                                          MultiExprArg Args,
                                          SourceLocation RParenLoc,
                                          Expr *ExecConfig,
-                                         bool AllowTypoCorrection) {
+                                         bool AllowTypoCorrection,
+                              const bool IsTransposingForUnifiedFunctionCall) {
   OverloadCandidateSet CandidateSet(Fn->getExprLoc(),
                                     OverloadCandidateSet::CSK_Normal);
   ExprResult result;
@@ -10858,11 +10861,12 @@ ExprResult Sema::BuildOverloadedCallExpr(Scope *S, Expr *Fn,
   OverloadCandidateSet::iterator Best;
   OverloadingResult OverloadResult =
       CandidateSet.BestViableFunction(*this, Fn->getLocStart(), Best);
-
+ 
   return FinishOverloadedCallExpr(*this, S, Fn, ULE, LParenLoc, Args,
                                   RParenLoc, ExecConfig, &CandidateSet,
                                   &Best, OverloadResult,
-                                  AllowTypoCorrection);
+                                  AllowTypoCorrection, 
+                                  IsTransposingForUnifiedFunctionCall);
 }
 
 static bool IsOverloaded(const UnresolvedSetImpl &Functions) {
@@ -11514,6 +11518,328 @@ Sema::CreateOverloadedArraySubscriptExpr(SourceLocation LLoc,
   return CreateBuiltinArraySubscriptExpr(Args[0], LLoc, Args[1], RLoc);
 }
 
+bool extractNameTemplateAndNNSInfoFromExpr(
+    const Expr *E, DeclarationNameInfo &FunNameInfo,
+    SourceLocation &TemplateKWLoc,
+    const ASTTemplateArgumentListInfo *&TemplateArgs,
+    NestedNameSpecifierLoc &NNSLoc) {
+  const Expr *ParenFreeE = E->IgnoreParens();
+  if (const auto *ULE = dyn_cast<UnresolvedLookupExpr>(ParenFreeE)) {
+    FunNameInfo = DeclarationNameInfo(ULE->getName(), ULE->getNameLoc());
+    TemplateArgs = ULE->getOptionalExplicitTemplateArgs();
+    TemplateKWLoc = ULE->getTemplateKeywordLoc();
+    NNSLoc = ULE->getQualifierLoc();
+    return true;
+  } else if (const auto *UnresExpr =
+          dyn_cast<UnresolvedMemberExpr>(ParenFreeE)) {
+    FunNameInfo =
+        DeclarationNameInfo(UnresExpr->getName(), UnresExpr->getNameLoc());
+    TemplateArgs = UnresExpr->getOptionalExplicitTemplateArgs();
+    TemplateKWLoc = UnresExpr->getTemplateKeywordLoc();
+    NNSLoc = UnresExpr->getQualifierLoc();
+    return true;
+  } else if (const auto *MemExpr = dyn_cast<MemberExpr>(ParenFreeE)) {
+    FunNameInfo = DeclarationNameInfo(MemExpr->getMemberDecl()->getDeclName(),
+                                      MemExpr->getMemberLoc());
+    TemplateArgs = MemExpr->getOptionalExplicitTemplateArgs();
+    TemplateKWLoc = MemExpr->getTemplateKeywordLoc();
+    NNSLoc = MemExpr->getQualifierLoc();
+    return true;
+  } else if (const auto *E = dyn_cast<DeclRefExpr>(ParenFreeE)) {
+    FunNameInfo = DeclarationNameInfo(E->getNameInfo().getName(),
+                                      E->getNameInfo().getBeginLoc());
+    TemplateArgs = E->getOptionalExplicitTemplateArgs();
+    TemplateKWLoc = E->getTemplateKeywordLoc();
+    NNSLoc = E->getQualifierLoc();
+    return true;
+  } else {
+    //ParenFreeE->dump();
+    //llvm_unreachable("Unexpected expression to extract name & template information from!");
+
+  }
+  
+  return false;
+}
+
+static bool inline hasArrowOperator(Expr *Base, SourceLocation OpLoc, Sema &S) {
+  
+  if (!Base->getType()->getAsCXXRecordDecl()) return false;
+  
+  SourceLocation Loc = Base->getExprLoc();
+  ASTContext &Context = S.getASTContext();
+
+  DeclarationName OpName =
+    Context.DeclarationNames.getCXXOperatorName(OO_Arrow);
+  OverloadCandidateSet CandidateSet(Loc, OverloadCandidateSet::CSK_Operator);
+  const RecordType *BaseRecord = Base->getType()->getAs<RecordType>();
+
+  if (S.RequireCompleteType(Loc, Base->getType(),
+                          diag::err_typecheck_incomplete_tag, Base))
+    return false;
+
+  LookupResult R(S, OpName, OpLoc, Sema::LookupOrdinaryName);
+  S.LookupQualifiedName(R, BaseRecord->getDecl());
+  R.suppressDiagnostics();
+
+  for (LookupResult::iterator Oper = R.begin(), OperEnd = R.end();
+       Oper != OperEnd; ++Oper) {
+    return true;
+  }
+  return false;
+}
+
+
+ExprResult Sema::TryBuildCallAsMemberFunction(Scope *S, Expr *Fn,
+                                         SourceLocation LParenLoc,
+                                         MultiExprArg Args,
+                                         SourceLocation RParenLoc) {
+  if (!Args.size()) return ExprError();
+  DiagnosticSuppresser TrapDiagnostics(*this);
+  
+  ASTBasedADLandUFCDeterminatorRAII AdlUfcRAII(*this, Fn);
+
+  if (!ConsiderUFC.getValue()) return ExprError();
+  
+  Expr *NakedFn = Fn->IgnoreParens();
+  DeclarationNameInfo FunNameInfo;
+  SourceLocation TemplateKWLoc;
+  const ASTTemplateArgumentListInfo *TemplateArgs = nullptr;
+  NestedNameSpecifierLoc NNSLoc;
+  
+  if (!extractNameTemplateAndNNSInfoFromExpr(NakedFn, FunNameInfo, TemplateKWLoc,
+                                        TemplateArgs, NNSLoc))
+    return ExprError();
+
+#ifndef NDEBUG
+  if (UnresolvedMemberExpr *UnresExpr =
+          dyn_cast<UnresolvedMemberExpr>(NakedFn)) {
+    assert(
+        UnresExpr->isImplicitAccess() &&
+        "Only implicit member calls should get transposed into member calls");
+  } else if (MemberExpr *MemExpr = dyn_cast<MemberExpr>(NakedFn)) {
+    assert(
+        MemExpr->isImplicitAccess() &&
+        "Only implicit member calls should get transposed into member calls");
+  }
+#endif
+
+  CXXScopeSpec SS; 
+  SS.Adopt(NNSLoc);
+  TemplateArgumentListInfo TALI;
+  if (TemplateArgs)
+    TemplateArgs->copyInto(TALI);
+
+  Optional<UnqualifiedId::IdKind> IdKind = [&] {
+    const DeclarationName &DN = FunNameInfo.getName();
+    switch(DN.getNameKind()) {
+    case DeclarationName::Identifier:
+      return Optional<UnqualifiedId::IdKind>(UnqualifiedId::IK_Identifier);
+    case DeclarationName::CXXOperatorName:
+      return Optional<UnqualifiedId::IdKind>(
+          UnqualifiedId::IK_OperatorFunctionId);
+    default:
+      return Optional<UnqualifiedId::IdKind>();
+    }
+  }();
+  if (!IdKind.hasValue()) 
+    return ExprError();
+
+  const bool IsArrowContainingObjectThatShouldBeTreatedAsAPointer =
+      getLangOpts().isUFCTreatObjectWithArrowAsPointer() &&
+      hasArrowOperator(Args[0], Args[0]->getLocEnd(), *this);
+  QualType FirstArgType = Args[0]->getType();
+
+  const bool UseArrow = FirstArgType->isPointerType() ||
+                        IsArrowContainingObjectThatShouldBeTreatedAsAPointer;
+  bool MayBePseudoDestructorIgnore = false;
+  assert(!FirstArgType->isDependentType());
+  ParsedType ParsedTypeIgnore;
+  // If the first argument is not a record type, or a pointer to a record, then fail.
+  if (!UseArrow && !FirstArgType->getAsCXXRecordDecl())
+    return ExprError();
+  if (UseArrow && !FirstArgType->getPointeeCXXRecordDecl() &&
+      !IsArrowContainingObjectThatShouldBeTreatedAsAPointer)
+    return ExprError();
+
+  ExprResult BaseER = ActOnStartCXXMemberReference(
+      S, Args[0], Args[0]->getLocEnd(), UseArrow ? tok::arrow : tok::period,
+      ParsedTypeIgnore, MayBePseudoDestructorIgnore);
+  
+  if (!BaseER.isUsable()) return ExprError();
+
+  ExprResult InventedMemExpr = ActOnMemberAccessExpr(
+      S, BaseER.get(), Fn->getLocStart(), UseArrow ? tok::arrow : tok::period,
+      SS, TemplateKWLoc, TemplateArgs ? &TALI : nullptr, FunNameInfo,
+      IdKind.getValue(),
+      /*ObjCImpDecl*/ nullptr);
+  if (!InventedMemExpr.isInvalid()) {
+
+    Expr *MExpr = InventedMemExpr.get();
+
+    if (auto *TE = dyn_cast<TypoExpr>(MExpr)) {
+      clearDelayedTypo(TE);
+      return ExprError();
+    }
+
+    ExprResult ResolvedMemberCallExpr =
+        ActOnCallExpr(S, InventedMemExpr.get(), LParenLoc, Args.slice(1),
+                      RParenLoc, nullptr, false,
+                      /*IsTransposingForUnifiedFunctionCall*/ true);
+    if (ResolvedMemberCallExpr.isUsable())
+      cast<CallExpr>(ResolvedMemberCallExpr.get())->setIsTransposedCall();
+
+    if (!TrapDiagnostics.hasErrorOccurred())
+      return ResolvedMemberCallExpr;
+  }
+  return ExprError();
+}
+
+ExprResult Sema::TryBuildCallAsNonMemberFunction(Scope *S, Expr *MemExprE,
+                                                 SourceLocation LParenLoc,
+                                                 MultiExprArg Args,
+                                                 SourceLocation RParenLoc) {
+  
+  DiagnosticSuppresser TrapDiagnostics(*this, true);  
+  ASTBasedADLandUFCDeterminatorRAII AdlUfcRAII(*this, MemExprE);
+
+  if (!ConsiderUFC.getValue()) 
+    return ExprError();
+  
+  // Dig out the member expression. This holds both the object
+  // argument and the member function we're referring to.
+  Expr *NakedMemExpr = MemExprE->IgnoreParens();
+  DeclarationNameInfo MemberNameInfo;
+  
+  Expr *ObjExpr = nullptr;
+  bool IsImplicitAccess = false;
+  SourceLocation TemplateKWLoc;
+  const ASTTemplateArgumentListInfo *TemplateArgs = nullptr;
+  NestedNameSpecifierLoc NNSLoc;
+  bool UsingArrowOp = false;
+  if (UnresolvedMemberExpr *UnresExpr =
+          dyn_cast<UnresolvedMemberExpr>(NakedMemExpr)) {
+    MemberNameInfo =
+        DeclarationNameInfo(UnresExpr->getName(), UnresExpr->getNameLoc());
+    IsImplicitAccess = UnresExpr->isImplicitAccess();
+    TemplateArgs = UnresExpr->getOptionalExplicitTemplateArgs();
+    TemplateKWLoc = UnresExpr->getTemplateKeywordLoc();
+    if (!IsImplicitAccess) ObjExpr = UnresExpr->getBase();
+    NNSLoc = UnresExpr->getQualifierLoc();
+    UsingArrowOp = UnresExpr->isArrow();
+  } else if (MemberExpr *MemExpr = dyn_cast<MemberExpr>(NakedMemExpr)) {
+    MemberNameInfo = DeclarationNameInfo(
+        MemExpr->getMemberDecl()->getDeclName(), MemExpr->getMemberLoc());
+    IsImplicitAccess = MemExpr->isImplicitAccess();
+    if (!IsImplicitAccess) 
+      ObjExpr = MemExpr->getBase();
+    TemplateArgs = MemExpr->getOptionalExplicitTemplateArgs();
+    TemplateKWLoc = MemExpr->getTemplateKeywordLoc();
+    NNSLoc = MemExpr->getQualifierLoc();
+    UsingArrowOp = MemExpr->isArrow();
+  } else {
+    MemExprE->dump();
+    llvm_unreachable("We should either have a unresolved or resolved member expr");
+  }
+  if (IsImplicitAccess) {
+    // If this is an implicit access it was written as 'f(y,3)' within a member
+    // function, but while we found a member function with the same name - the
+    // call to it is not well-formed, so now try y.f(3) - do not try a
+    // non-member call.
+    return TryBuildCallAsMemberFunction(S, MemExprE, LParenLoc, Args,
+                                        RParenLoc);
+  } else {
+    // Try non-member call syntax.
+    CXXScopeSpec SS; 
+    SS.Adopt(NNSLoc);
+    // Only works with identifiers, operator function ids
+    Optional<UnqualifiedId::IdKind> IdKind = [&] {
+      const DeclarationName &DN = MemberNameInfo.getName();
+      switch (DN.getNameKind()) {
+      case DeclarationName::Identifier:
+        return Optional<UnqualifiedId::IdKind>(UnqualifiedId::IK_Identifier);
+      case DeclarationName::CXXOperatorName:
+        return Optional<UnqualifiedId::IdKind>(
+            UnqualifiedId::IK_OperatorFunctionId);
+
+      default:
+        return Optional<UnqualifiedId::IdKind>();
+      }
+    }();
+    if (!IdKind.hasValue()) 
+      return ExprError();
+    TemplateArgumentListInfo TemplateArgsLI;
+    if (TemplateArgs)
+      TemplateArgs->copyInto(TemplateArgsLI);
+
+    ExprResult UnresNonMemberExpr = ActOnIdExpression(
+        S, SS, TemplateKWLoc, TemplateArgs ? &TemplateArgsLI : nullptr,
+        MemberNameInfo, IdKind.getValue(),
+        /*HasTrailingLParen*/ ConsiderADL.getValue(),
+        /*IsAddressOfOperand*/ false, 
+        /*CorrectionCandidateCallBack*/ nullptr, /*IsInlineASM*/ false,
+        /*KeywordReplacement*/ nullptr);
+    
+    if (UnresNonMemberExpr.isInvalid()) return ExprError();
+
+    // If instantiating a template, check declarations found at definition
+    // context.
+    if (CallsUndergoingInstantiation.size()) {
+      assert(!S && "How is there a parsing scope structure when "
+                   "instantiating a callexpr?");
+      UnresolvedLookupExpr *CurULE =
+          cast<UnresolvedLookupExpr>(UnresNonMemberExpr.get());
+
+      assert(!CurULE->getNumDecls() && "Ordinary lookup should fail!");
+      CallExpr *CallUI = CallsUndergoingInstantiation.back();
+      // Merge the calls found through ADL and definition context lookup.
+      if (DeclRefExpr *DRE =
+              CallUI->getDefinitionContextLookupOfIdAsResolvedExpr()) {
+        assert(DRE->getNameInfo().getName() == MemberNameInfo.getName() &&
+               "The names should match from definition context lookup of the "
+               "id");
+        UnresNonMemberExpr.set(DRE);
+      } else if (UnresolvedLookupExpr *ULE =
+                     CallUI->getDefinitionContextLookupOfIdAsUnresolvedExpr()) {
+        assert(ULE->getNameInfo().getName() == MemberNameInfo.getName() &&
+               "The names should match from definition context lookup of the "
+               "id");
+        UnresNonMemberExpr.set(ULE);
+      }
+    }
+
+    llvm::SmallVector<Expr *, 8> ArgsWithObjAdded;
+    Expr *ObjArg = ObjExpr;
+    // If this is the result of the use of an arrow to call this member function
+    // - then dereference the objexpr and use it as the obj argument.
+    if (UsingArrowOp) {
+      // If the arrow operator is being used on a class object, and the class
+      // has an overloaded arrow operator, the object expression has already
+      // been transformed into arrow op calls that result in a pointer.
+      assert(
+          ObjExpr->getType()->isPointerType() &&
+          "If we get here using the arrow op the objexpr better be a pointer!");
+
+      ExprResult DerefExpr =
+          BuildUnaryOp(S, ObjExpr->getLocStart(), UO_Deref, ObjExpr);
+      if (DerefExpr.isInvalid())
+        return ExprError();
+      ObjArg = DerefExpr.get();
+    }
+    ArgsWithObjAdded.push_back(ObjArg);
+    ArgsWithObjAdded.append(Args.begin(), Args.end());
+    ExprResult ResolvedCallExpr =
+        ActOnCallExpr(S, UnresNonMemberExpr.get(), LParenLoc, ArgsWithObjAdded,
+                      RParenLoc, nullptr, false,
+                      /*IsTransposingForUnifiedFunctionCall*/ true);
+
+    if (ResolvedCallExpr.isUsable() && !TrapDiagnostics.hasErrorOccurred()) {
+      cast<CallExpr>(ResolvedCallExpr.get())->setIsTransposedCall();
+      return ResolvedCallExpr;
+    }
+  }
+  return ExprError();
+}
+
 /// BuildCallToMemberFunction - Build a call to a member
 /// function. MemExpr is the expression that refers to the member
 /// function (and includes the object parameter), Args/NumArgs are the
@@ -11525,7 +11851,8 @@ ExprResult
 Sema::BuildCallToMemberFunction(Scope *S, Expr *MemExprE,
                                 SourceLocation LParenLoc,
                                 MultiExprArg Args,
-                                SourceLocation RParenLoc) {
+                                SourceLocation RParenLoc,
+                              const bool IsTransposingForUnifiedFunctionCall) {
   assert(MemExprE->getType() == Context.BoundMemberTy ||
          MemExprE->getType() == Context.OverloadTy);
 
@@ -11679,13 +12006,47 @@ Sema::BuildCallToMemberFunction(Scope *S, Expr *MemExprE,
         return ExprError();
       break;
 
-    case OR_No_Viable_Function:
-      Diag(UnresExpr->getMemberLoc(),
-           diag::err_ovl_no_viable_member_function_in_call)
-        << DeclName << MemExprE->getSourceRange();
-      CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args);
+    case OR_No_Viable_Function: {
+      // If there were originally no members with that name, then output the
+      // diagnostic that would have been output if the member name had never
+      // been found.
+      if (UnresExpr->decls_begin() == UnresExpr->decls_end()) {
+        const DeclContext *DC = nullptr;
+        
+        // Check if it's a class or a pointer to a class?
+        if (auto *RD = UnresExpr->getBaseType()->getAsCXXRecordDecl())
+          DC = cast<DeclContext>(RD);
+        else if (auto *RD = UnresExpr->getBaseType()->getPointeeCXXRecordDecl())
+          DC = cast<DeclContext>(RD);
+        else {
+          // We allow the member syntax on non-class objects
+          Diag(UnresExpr->getOperatorLoc(),
+               diag::err_typecheck_member_reference_struct_union)
+              << UnresExpr->getBaseType()
+              << UnresExpr->getBase()->getSourceRange()
+              << UnresExpr->getMemberLoc();
+          return ExprError();
+        }
+        if (DC) {
+          Diag(UnresExpr->getMemberLoc(), diag::err_no_member)
+              << DeclName
+              << const_cast<DeclContext*>(DC)
+              << (!UnresExpr->isImplicitAccess()
+                      ? UnresExpr->getBase()->getSourceRange()
+                      : SourceRange());
+        } else {
+          goto member_fun_not_found_err;
+        }
+      } else {
+member_fun_not_found_err:
+        Diag(UnresExpr->getMemberLoc(),
+              diag::err_ovl_no_viable_member_function_in_call)
+          << DeclName << MemExprE->getSourceRange();
+        CandidateSet.NoteCandidates(*this, OCD_AllCandidates, Args);
+      }
       // FIXME: Leaking incoming expressions!
-      return ExprError();
+      return ExprError();      
+    }
 
     case OR_Ambiguous:
       Diag(UnresExpr->getMemberLoc(), diag::err_ovl_ambiguous_member_call)
@@ -11737,12 +12098,11 @@ Sema::BuildCallToMemberFunction(Scope *S, Expr *MemExprE,
       }
     }
   }
-
   // Check for a valid return type.
   if (CheckCallReturnType(Method->getReturnType(), MemExpr->getMemberLoc(),
-                          TheCall, Method))
+                          TheCall, Method)) {
     return ExprError();
-
+  }
   // Convert the object argument (for a non-static member function call).
   // We only need to do this if there was actually an overload; otherwise
   // it was done at lookup.
@@ -11752,16 +12112,19 @@ Sema::BuildCallToMemberFunction(Scope *S, Expr *MemExprE,
                                           FoundDecl, Method);
     if (ObjectArg.isInvalid())
       return ExprError();
+   
     MemExpr->setBase(ObjectArg.get());
   }
 
   // Convert the rest of the arguments
   const FunctionProtoType *Proto =
     Method->getType()->getAs<FunctionProtoType>();
+  
   if (ConvertArgumentsForCall(TheCall, MemExpr, Method, Proto, Args,
-                              RParenLoc))
+                              RParenLoc, /*ExecConfig*/false)) {
     return ExprError();
-
+  }
+  
   DiagnoseSentinelCalls(Method, LParenLoc, Args);
 
   if (CheckFunctionCall(Method, TheCall, Proto))
@@ -12327,7 +12690,8 @@ Sema::BuildForRangeBeginEndCall(Scope *S, SourceLocation Loc,
     *CallExpr = FinishOverloadedCallExpr(*this, S, Fn, Fn, Loc, Range,
                                          Loc, nullptr, CandidateSet, &Best,
                                          OverloadResult,
-                                         /*AllowTypoCorrection=*/false);
+                                         /*AllowTypoCorrection=*/false, 
+                                         /*TransposingForUFC*/false);
     if (CallExpr->isInvalid() || OverloadResult != OR_Success) {
       *CallExpr = ExprError();
       Diag(Range->getLocStart(), diag::note_in_for_range)

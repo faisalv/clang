@@ -5,7 +5,7 @@ namespace test0 {
   template <class T> struct A {
     static void foo(const T &t) {}
     static void foo(T &&t) {
-      t.foo(); // expected-error {{member reference base type 'int' is not a structure or union}}
+      ((t.foo))(); // expected-error {{member reference base type 'int' is not a structure or union}}
     }
   }; 
 

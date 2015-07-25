@@ -517,6 +517,7 @@ namespace  {
     void VisitMaterializeTemporaryExpr(const MaterializeTemporaryExpr *Node);
     void VisitExprWithCleanups(const ExprWithCleanups *Node);
     void VisitUnresolvedLookupExpr(const UnresolvedLookupExpr *Node);
+    void VisitUnresolvedMemberExpr(const UnresolvedMemberExpr *Node);
     void dumpCXXTemporary(const CXXTemporary *Temporary);
     void VisitLambdaExpr(const LambdaExpr *Node) {
       VisitExpr(Node);
@@ -1785,9 +1786,33 @@ void ASTDumper::VisitUnresolvedLookupExpr(const UnresolvedLookupExpr *Node) {
     I = Node->decls_begin(), E = Node->decls_end();
   if (I == E)
     OS << " empty";
+  auto I2 = I;
   for (; I != E; ++I)
     dumpPointer(*I);
+  for (; I2 != E; ++I2)
+    dumpDecl(*I2);
 }
+
+void ASTDumper::VisitUnresolvedMemberExpr(const UnresolvedMemberExpr *Node) {
+  VisitExpr(Node);
+  //QualType BaseTy = Node->getBaseType();
+  //VisitType(BaseTy.getTypePtr());
+  if (Node->isImplicitAccess()) {  
+    OS << "(implicit 'this')";
+  }
+  OS << " " << (Node->isArrow() ? "->" : ".");
+  OS << '\'' << Node->getName() << '\'';
+
+  auto I = Node->decls_begin(), E = Node->decls_end();
+  if (I == E)
+    OS << " empty";
+  auto I2 = I;
+  for (; I != E; ++I)
+    dumpPointer(*I);
+  for (; I2 != E; ++I2)
+    dumpDecl(*I2);
+}
+
 
 void ASTDumper::VisitObjCIvarRefExpr(const ObjCIvarRefExpr *Node) {
   VisitExpr(Node);

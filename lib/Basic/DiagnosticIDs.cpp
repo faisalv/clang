@@ -619,11 +619,27 @@ bool DiagnosticIDs::ProcessDiag(DiagnosticsEngine &Diag) const {
     ++Diag.TrapNumErrorsOccurred;
     if (isUnrecoverable(DiagID))
       ++Diag.TrapNumUnrecoverableErrorsOccurred;
+    if (isDefaultMappingAsError(DiagID))
+      ++Diag.TrapNumUncompilableErrorsOccurred;
+    if (DiagLevel == DiagnosticIDs::Fatal)
+      ++Diag.TrapNumFatalErrorsOccurred;
   }
 
-  if (Diag.SuppressAllDiagnostics)
+  if (Diag.SuppressAllDiagnostics &&
+      (DiagLevel != DiagnosticIDs::Fatal &&
+       Diag.LastDiagLevel != DiagnosticIDs::Fatal)) {
+    //FVTODO: Add a flag, and then only store suppressed diagnostics if that flag is set.
+    if (!Diag.FatalErrorOccurred && DiagLevel != DiagnosticIDs::Ignored &&
+        (Diag.TrapLastDiagLevel != DiagnosticIDs::Ignored ||
+         DiagLevel != DiagnosticIDs::Note))
+      Diag.SuppressedDiagnostics.emplace_back(
+          static_cast<DiagnosticsEngine::Level>(DiagLevel), Info);
+    if (DiagLevel != DiagnosticIDs::Note)
+      Diag.TrapLastDiagLevel = DiagLevel;
+    //Diag.setLastDiagnosticIgnored();
+    //Diag.Clear();
     return false;
-
+  }
   if (DiagLevel != DiagnosticIDs::Note) {
     // Record that a fatal error occurred only when we see a second
     // non-note diagnostic. This allows notes to be attached to the

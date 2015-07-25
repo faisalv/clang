@@ -175,6 +175,7 @@ private:
   bool ErrorsAsFatal;            // Treat errors like fatal errors.
   bool SuppressSystemWarnings;   // Suppress warnings in system headers.
   bool SuppressAllDiagnostics;   // Suppress all diagnostics.
+  class DiagnosticSuppresser *CurDiagnosticSuppresser;
   bool ElideType;                // Elide common types of templates.
   bool PrintTemplateTree;        // Print a tree when comparing templates.
   bool ShowColors;               // Color printing is enabled.
@@ -294,12 +295,14 @@ private:
   /// during a parsing section, e.g. during parsing a function.
   unsigned TrapNumErrorsOccurred;
   unsigned TrapNumUnrecoverableErrorsOccurred;
-
+  unsigned TrapNumUncompilableErrorsOccurred;
+  unsigned TrapNumFatalErrorsOccurred;
   /// \brief The level of the last diagnostic emitted.
   ///
   /// This is used to emit continuation diagnostics with the same level as the
   /// diagnostic that they follow.
   DiagnosticIDs::Level LastDiagLevel;
+  DiagnosticIDs::Level TrapLastDiagLevel;
 
   unsigned NumWarnings;         ///< Number of warnings reported
   unsigned NumErrors;           ///< Number of errors reported
@@ -343,6 +346,8 @@ private:
   std::string FlagValue;
 
 public:
+  std::vector<StoredDiagnostic> SuppressedDiagnostics;
+
   explicit DiagnosticsEngine(
                       const IntrusiveRefCntPtr<DiagnosticIDs> &Diags,
                       DiagnosticOptions *DiagOpts,
@@ -466,6 +471,10 @@ public:
     SuppressAllDiagnostics = Val; 
   }
   bool getSuppressAllDiagnostics() const { return SuppressAllDiagnostics; }
+
+  class DiagnosticSuppresser *getCurDiagnosticSuppresser() const {
+    return CurDiagnosticSuppresser;
+  }
 
   /// \brief Set type eliding, to skip outputting same types occurring in
   /// template types.
@@ -722,7 +731,8 @@ private:
   friend class Diagnostic;
   friend class PartialDiagnostic;
   friend class DiagnosticErrorTrap;
-  
+  friend class DiagnosticSuppresser;
+
   /// \brief The location of the current diagnostic that is in flight.
   SourceLocation CurDiagLoc;
 
@@ -823,7 +833,9 @@ class DiagnosticErrorTrap {
   DiagnosticsEngine &Diag;
   unsigned NumErrors;
   unsigned NumUnrecoverableErrors;
-
+  unsigned NumUncompilableErrors;
+  unsigned NumFatalErrors;
+  friend class DiagnosticSuppresser;
 public:
   explicit DiagnosticErrorTrap(DiagnosticsEngine &Diag)
     : Diag(Diag) { reset(); }
@@ -840,10 +852,18 @@ public:
     return Diag.TrapNumUnrecoverableErrorsOccurred > NumUnrecoverableErrors;
   }
 
+  bool hasUncompilableErrorOccurred() const {
+    return Diag.TrapNumUncompilableErrorsOccurred > NumUncompilableErrors;
+  }
+  bool hasFatalErrorOccurred() const {
+    return Diag.TrapNumFatalErrorsOccurred > NumFatalErrors;
+  }
   /// \brief Set to initial state of "no errors occurred".
   void reset() {
     NumErrors = Diag.TrapNumErrorsOccurred;
     NumUnrecoverableErrors = Diag.TrapNumUnrecoverableErrorsOccurred;
+    NumUncompilableErrors = Diag.TrapNumUncompilableErrorsOccurred;
+    NumFatalErrors = Diag.TrapNumFatalErrorsOccurred;
   }
 };
 

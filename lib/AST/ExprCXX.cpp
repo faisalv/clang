@@ -1354,7 +1354,7 @@ UnresolvedMemberExpr::UnresolvedMemberExpr(const ASTContext &C,
 
   // Check whether all of the members are non-static member functions,
   // and if so, mark give this bound-member type instead of overload type.
-  if (hasOnlyNonStaticMemberFunctions(Begin, End))
+  if (Begin == End || hasOnlyNonStaticMemberFunctions(Begin, End))
     setType(C.BoundMemberTy);
 }
 
