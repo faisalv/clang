@@ -178,6 +178,7 @@ template<class T> void mt(T t) {
   // bring g(int)
   using ns2::g;
   char *g1 = cad::X{}.g(3.14);
+  { char *g2 = t.g(3.14); }
   
   int **g(T, double);
   int **g2 = t.g(3.14);

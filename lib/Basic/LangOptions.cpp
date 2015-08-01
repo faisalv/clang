@@ -21,7 +21,8 @@ LangOptions::LangOptions() {
 }
 
 bool LangOptions::isUnifiedFunctionCallEnabled() const {
-  return CPlusPlus && (UFCFavorAsWritten ||
+  return CPlusPlus && 
+        (UFCFavorAsWritten ||
          UFCFavorMember);
 }
 
@@ -33,7 +34,7 @@ bool LangOptions::isUFCFavorAsWritten() const {
     return UFCFavorAsWritten;
   }
 bool LangOptions::isUFCFavorMember() const {
-    return //isUnifiedFunctionCallEnabled();
+    return //true;//isUnifiedFunctionCallEnabled();
      UFCFavorMember;
 }
 bool LangOptions::isUFCTreatObjectWithArrowAsPointer() const {
