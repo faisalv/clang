@@ -1399,8 +1399,16 @@ class TemplateDiff {
 
     APValue &FromVal = FromResult.Val;
     APValue &ToVal = ToResult.Val;
+    extern const bool LangOptsAreLiteralTypeNTTPsEnabled;
+    if (LangOptsAreLiteralTypeNTTPsEnabled) {
+      llvm::FoldingSetNodeID FID, TID;
+      FromVal.ProfileAsNonTypeTemplateArgument(FID, Context);
+      ToVal.ProfileAsNonTypeTemplateArgument(TID, Context);
+      return FID == TID;
+    }
 
     if (FromVal.getKind() != ToVal.getKind()) return false;
+
 
     switch (FromVal.getKind()) {
       case APValue::Int:
@@ -1417,7 +1425,7 @@ class TemplateDiff {
       }
       case APValue::MemberPointer:
         return FromVal.getMemberPointerDecl() == ToVal.getMemberPointerDecl();
-      default:
+      default: 
         llvm_unreachable("Unknown template argument expression.");
     }
   }

@@ -5064,8 +5064,14 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
                 <<  CCEK_TemplateArg << Arg->getSourceRange();
             for (unsigned I = 0; I < PartialDiagNotes.size(); ++I)
               Diag(PartialDiagNotes[I].first, PartialDiagNotes[I].second);
-          } else
+          } else {
             ArgResult = InitExpr;
+          }
+        } else {
+          if (!ErrorTrap.hasErrorOccurred()) {
+            Diag(Arg->getLocStart(), diag::err_expr_not_cce)
+                <<  CCEK_TemplateArg << Arg->getSourceRange();
+          }
         }
       }
     } else {

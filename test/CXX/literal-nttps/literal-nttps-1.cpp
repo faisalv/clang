@@ -239,6 +239,31 @@ template<> struct X2<V{"abcd"}> { }; //expected-error{{address of string literal
 
 
 } // end ns4_check_in_unions_and_variants
+namespace ns5_test_not_allowed_globally {
+  struct Bad { const char *p;  };
+  struct OK { char p[10]; };
+  template<Bad B> struct X { };
+  template<OK O> struct Y { };
+  const char GlobalP[] = "abc";
+  X<{"abc"}> xi; //expected-error{{address of string literal}}
+  // Leave this test with the same two names, because it tests 
+  // ability to compare such literals within ASTDiagnostic.
+  X<{GlobalP}> x2; //expected-note{{previous}}
+  X<{GlobalP + 1}> x2; //expected-error{{redefinition}}
+  Y<{"abc"}> yi; 
+  
+  namespace ns5_1 {
+    const char *GlobalP = "abc";
+    X<{GlobalP}> x; //expected-error{{not a constant}}
+    const char *const GlobalP2 = "abc";
+    X<{GlobalP2}> x2; //expected-error{{string literal}}
+    char C = 10;
+    const char *const GlobalP3 = &C;
+    X<{GlobalP3}> x3;
+    X<{GlobalP3 + 1}> x3; //expected-error{{one past end pointer}}
+  } // end ns5_1
+  
+} // end ns5_test_not_allowed_globally
 } // end test_string_literals_ban
 
 namespace test_array_vars_and_values {
