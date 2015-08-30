@@ -255,6 +255,7 @@ public:
   void mangleName(const NamedDecl *ND);
   void mangleFunctionEncoding(const FunctionDecl *FD, bool ShouldMangle);
   void mangleVariableEncoding(const VarDecl *VD);
+  void mangleFieldEncoding(const FieldDecl *VD);
   void mangleMemberDataPointer(const CXXRecordDecl *RD, const ValueDecl *VD);
   void mangleMemberFunctionPointer(const CXXRecordDecl *RD,
                                    const CXXMethodDecl *MD);
@@ -315,6 +316,7 @@ private:
                           const TemplateArgumentList &TemplateArgs);
   void mangleTemplateArg(const TemplateDecl *TD, const TemplateArgument &TA,
                          const NamedDecl *Parm);
+  void mangleAPValue(const APValue &V, QualType T, SourceRange SR);
 };
 }
 
@@ -376,6 +378,66 @@ MicrosoftMangleContextImpl::shouldMangleStringLiteral(const StringLiteral *SL) {
   return true;
 }
 
+void MicrosoftCXXNameMangler::mangleFieldEncoding(const FieldDecl *FD) {
+  // FVTODO: We need to fix the mangling of fields...
+
+  mangleName(FD);
+  Out << 'M';
+#if 0
+  // <type-encoding> ::= <storage-class> <variable-type>
+  // <storage-class> ::= 0  # private static member
+  //                 ::= 1  # protected static member
+  //                 ::= 2  # public static member
+  //                 ::= 3  # global
+  //                 ::= 4  # static local
+
+  // The first character in the encoding (after the name) is the storage class.
+  if (VD->isStaticDataMember()) {
+    // If it's a static member, it also encodes the access level.
+    switch (VD->getAccess()) {
+      default:
+      case AS_private: Out << '0'; break;
+      case AS_protected: Out << '1'; break;
+      case AS_public: Out << '2'; break;
+    }
+  }
+  else if (!VD->isStaticLocal())
+    Out << '3';
+  else
+    Out << '4';
+  // Now mangle the type.
+  // <variable-type> ::= <type> <cvr-qualifiers>
+  //                 ::= <type> <pointee-cvr-qualifiers> # pointers, references
+  // Pointers and references are odd. The type of 'int * const foo;' gets
+  // mangled as 'QAHA' instead of 'PAHB', for example.
+  SourceRange SR = VD->getSourceRange();
+  QualType Ty = VD->getType();
+  if (Ty->isPointerType() || Ty->isReferenceType() ||
+      Ty->isMemberPointerType()) {
+    mangleType(Ty, SR, QMM_Drop);
+    manglePointerExtQualifiers(
+        Ty.getDesugaredType(getASTContext()).getLocalQualifiers(), QualType());
+    if (const MemberPointerType *MPT = Ty->getAs<MemberPointerType>()) {
+      mangleQualifiers(MPT->getPointeeType().getQualifiers(), true);
+      // Member pointers are suffixed with a back reference to the member
+      // pointer's class name.
+      mangleName(MPT->getClass()->getAsCXXRecordDecl());
+    } else
+      mangleQualifiers(Ty->getPointeeType().getQualifiers(), false);
+  } else if (const ArrayType *AT = getASTContext().getAsArrayType(Ty)) {
+    // Global arrays are funny, too.
+    mangleDecayedArrayType(AT);
+    if (AT->getElementType()->isArrayType())
+      Out << 'A';
+    else
+      mangleQualifiers(Ty.getQualifiers(), false);
+  } else {
+    mangleType(Ty, SR, QMM_Drop);
+    mangleQualifiers(Ty.getQualifiers(), false);
+  }
+#endif
+}
+
 void MicrosoftCXXNameMangler::mangle(const NamedDecl *D, StringRef Prefix) {
   // MSVC doesn't mangle C++ names the same way it mangles extern "C" names.
   // Therefore it's really important that we don't decorate the
@@ -390,6 +452,8 @@ void MicrosoftCXXNameMangler::mangle(const NamedDecl *D, StringRef Prefix) {
     mangleFunctionEncoding(FD, Context.shouldMangleDeclName(FD));
   else if (const VarDecl *VD = dyn_cast<VarDecl>(D))
     mangleVariableEncoding(VD);
+  else if (const FieldDecl *FD = dyn_cast<FieldDecl>(D)) 
+    mangleFieldEncoding(FD);
   else {
     // TODO: Fields? Can MSVC even mangle them?
     // Issue a diagnostic for now.
@@ -1146,6 +1210,197 @@ void MicrosoftCXXNameMangler::mangleExpression(const Expr *E) {
   Diags.Report(E->getExprLoc(), DiagID) << E->getStmtClassName()
                                         << E->getSourceRange();
 }
+void MicrosoftCXXNameMangler::mangleAPValue(const APValue &V, QualType T, SourceRange SR) {
+  switch (V.getKind()) {
+  case APValue::Uninitialized:
+    llvm_unreachable("Should not need to mangle unitialized APValues");
+
+  case APValue::Int:
+    assert(T->isIntegralOrEnumerationType());
+    //mangleType(T, SR);
+    return mangleIntegerLiteral(V.getInt(), T->isBooleanType());
+  case APValue::Struct: {
+    CXXRecordDecl *RD = T->getAsCXXRecordDecl();
+    assert(RD);
+    const unsigned NumBases = V.getStructNumBases();
+    mangleType(T, SR);
+    
+    auto *baseIt = RD->bases_begin();
+    assert(NumBases == RD->getNumBases());
+    for (unsigned I = 0; I != NumBases; ++I, ++baseIt)
+      mangleAPValue(V.getStructBase(I), baseIt->getType(), SR);
+    const unsigned NumFields = V.getStructNumFields();
+    auto fieldIt = RD->field_begin();
+    
+    for (unsigned I = 0; I != NumFields; ++I, ++fieldIt)
+      mangleAPValue(V.getStructField(I), fieldIt->getType(), SR);
+    assert(fieldIt == RD->field_end());
+    return;
+  }
+
+  case APValue::MemberPointer: {
+    const ValueDecl *ND = V.getMemberPointerDecl();
+    //FVTODO: All this mangling might be wrong...
+    if (isa<FieldDecl>(ND) || isa<IndirectFieldDecl>(ND)) {
+      mangleMemberDataPointer(
+          cast<CXXRecordDecl>(ND->getDeclContext())->getMostRecentDecl(),
+          cast<ValueDecl>(ND));
+    } else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(ND)) {
+      const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(FD);
+      if (MD && MD->isInstance()) {
+        mangleMemberFunctionPointer(MD->getParent()->getMostRecentDecl(), MD);
+      } else {
+        Out << "$1?";
+        mangleName(FD);
+        mangleFunctionEncoding(FD, /*ShouldMangle=*/true);
+      }
+    }
+    for (const CXXRecordDecl *RD : V.getMemberPointerPath())
+      mangleType(RD->getCanonicalDecl());
+
+    return;
+  }
+  case APValue::LValue: {
+
+    //   For a non-type template-parameter of pointer or reference type, the
+    //   value of the constant expression shall not refer to
+    //assert(ParamType->isPointerType() || ParamType->isReferenceType() ||
+    //       ParamType->isNullPtrType());
+    if (V.isLValueOnePastTheEnd()) {
+      llvm_unreachable("We should never be mangling a one past the end pointer");
+    }
+
+    // -- a temporary object -- a string literal -- the result of a typeid
+    // expression, or -- a predefind __func__ variable
+    if (auto *E = V.getLValueBase().dyn_cast<const Expr *>()) {
+      if (isa<CXXUuidofExpr>(E)) {
+        return mangleExpression(E);
+      }
+      // If a string literal makes it here, we must have a corresponding
+      // constant array type.
+      if (isa<StringLiteral>(E)) {
+        assert(isa<StringLiteral>(E) && "The only expression that should be a "
+                                      "template argument LValue is a string "
+                                      "literal!");
+      // String literals are treated as arrays.
+      
+      const StringLiteral *SL = cast<StringLiteral>(E);
+      mangleType(SL->getType(), SR);
+      const ConstantArrayType *StrArrTy = cast<ConstantArrayType>(SL->getType().getTypePtr());
+      ASTContext &Ctx = getASTContext();
+      const unsigned ArraySize = Ctx.getConstantArrayElementCount(StrArrTy);
+      
+      assert(ArraySize >= SL->getLength() &&
+             "How is the array size not >= the string literal!");
+      QualType CharTy;
+      if (SL->isWide())
+        CharTy = Ctx.WideCharTy; // L'x' -> wchar_t in C and C++.
+      else if (SL->isUTF16())
+        CharTy = Ctx.Char16Ty; // u'x' -> char16_t in C11 and C++11.
+      else if (SL->isUTF32())
+        CharTy = Ctx.Char32Ty; // U'x' -> char32_t in C11 and C++11.
+      else
+        CharTy = Ctx.CharTy;  // 'x' -> char in C++
+      unsigned NumInitialized = 0;
+      for(int N = SL->getLength(); NumInitialized != N; ++NumInitialized) {
+        uint32_t CU = SL->getCodeUnit(NumInitialized);
+        mangleAPValue(APValue(Ctx.MakeIntValue(CU, CharTy)), CharTy, SR);
+      }
+      while (NumInitialized++ < ArraySize)
+        mangleAPValue(APValue(Ctx.MakeIntValue(0, CharTy)), CharTy, SR);
+
+      return;        
+      }
+      llvm_unreachable("cannot mangle non-string-literal template argument exprs as lvalue.");
+
+    }
+    auto *VD = const_cast<ValueDecl *>(
+        V.getLValueBase().dyn_cast<const ValueDecl *>());
+    assert(V.hasLValuePath());
+    
+   
+    const NamedDecl *ND = cast<NamedDecl>(VD);
+    if (isa<FieldDecl>(ND) || isa<IndirectFieldDecl>(ND)) {
+      mangleMemberDataPointer(
+          cast<CXXRecordDecl>(ND->getDeclContext())->getMostRecentDecl(),
+          cast<ValueDecl>(ND));
+    } else if (const FunctionDecl *FD = dyn_cast<FunctionDecl>(ND)) {
+      const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(FD);
+      if (MD && MD->isInstance()) {
+        mangleMemberFunctionPointer(MD->getParent()->getMostRecentDecl(), MD);
+      } else {
+        Out << "$1?";
+        mangleName(FD);
+        mangleFunctionEncoding(FD, /*ShouldMangle=*/true);
+      }
+    } else {
+      mangle(ND, T->isReferenceType() ? "$E?" : "$1?");
+    }
+    
+    auto LValuePaths = V.getLValuePath();
+    using BaseOrMemberType = APValue::BaseOrMemberType;
+    
+    /*
+    // FVFIXME: This is incorrect - we should walk the path and store the type at each step.
+    
+    if (VD->getType()->isArrayType()) {
+      for (auto &&LE : LValuePaths) {
+        mangleNumber(LE.ArrayIndex);
+      }
+    } else {
+      for (auto &&LE : LValuePaths) {
+        const Decl *BaseOrMember =
+            BaseOrMemberType::getFromOpaqueValue(LE.BaseOrMember).getPointer();
+        mangle(cast<NamedDecl>(BaseOrMember));
+      }
+    }
+    //*/
+    break;    
+  }
+ 
+  case APValue::Float:
+    // For a float - get its numeric represenation 
+    mangleType(T, SR);
+    return mangleNumber(V.getFloat().bitcastToAPInt().getZExtValue());
+  
+  case APValue::Array: {
+    assert(T->isConstantArrayType());
+    const ConstantArrayType *CArray =
+        cast<ConstantArrayType>(T.getTypePtr());
+    const unsigned ArraySize = V.getArraySize();
+
+    const unsigned NumInitializedElts = V.getArrayInitializedElts();
+   
+    unsigned I;
+    mangleType(T, SR);
+    for (I = 0; I != NumInitializedElts; ++I)
+      mangleAPValue(V.getArrayInitializedElt(I),
+                                             CArray->getElementType(), SR);
+    // Check just one of the fillers - if that is ok, the rest should be -
+    // right?
+    while (I++ != ArraySize) {
+      mangleAPValue(V.getArrayFiller(), CArray->getElementType(), SR);
+    }
+    return;
+  }
+  case APValue::Union: {
+    mangleNumber(V.getUnionField()->getFieldIndex());
+    mangleAPValue(V.getUnionValue(), V.getUnionField()->getType(), SR);
+    return;
+  }
+#define MANGLING_NOT_DEFINED(x) case APValue:: ## x:          \
+    llvm_unreachable("Can not hangle mangling APValue::" #x); \
+    /**/
+
+  MANGLING_NOT_DEFINED(ComplexInt)
+  MANGLING_NOT_DEFINED(ComplexFloat)
+  MANGLING_NOT_DEFINED(Vector)
+  MANGLING_NOT_DEFINED(AddrLabelDiff)
+
+#undef MANGLING_NOT_DEFINED
+  }
+
+}
 
 void MicrosoftCXXNameMangler::mangleTemplateArgs(
     const TemplateDecl *TD, const TemplateArgumentList &TemplateArgs) {
@@ -1268,6 +1523,11 @@ void MicrosoftCXXNameMangler::mangleTemplateArg(const TemplateDecl *TD,
     } else {
       llvm_unreachable("unexpected template template NamedDecl!");
     }
+    break;
+  }
+  case TemplateArgument::LiteralNonIntegralType: {
+    mangleAPValue(TA.getAsAPValue(), TA.getLiteralNonIntegralType(),
+                  SourceRange());
     break;
   }
   }

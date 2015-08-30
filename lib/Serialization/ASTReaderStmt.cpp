@@ -1305,6 +1305,14 @@ void ASTStmtReader::VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *E) {
   E->setLocation(ReadSourceLocation(Record, Idx));
 }
 
+void ASTStmtReader::VisitCXXLiteralTypeConstantExpr(
+    CXXLiteralTypeConstantExpr *E) {
+  VisitExpr(E);
+  // FVTODO: Once we teach the writer to serialize the APValue we'll have to
+  // teach the reader to read it back. E->setValue(Record[Idx++]);
+  E->setLocation(ReadSourceLocation(Record, Idx));
+}
+
 void ASTStmtReader::VisitCXXNullPtrLiteralExpr(CXXNullPtrLiteralExpr *E) {
   VisitExpr(E);
   E->setLocation(ReadSourceLocation(Record, Idx));
@@ -2981,7 +2989,9 @@ Stmt *ASTReader::ReadStmtFromStream(ModuleFile &F) {
     case EXPR_CXX_BOOL_LITERAL:
       S = new (Context) CXXBoolLiteralExpr(Empty);
       break;
-
+    case EXPR_CXX_LITERAL_TYPE_CONSTANT:
+      S = new (Context) CXXLiteralTypeConstantExpr(Empty);
+      break;
     case EXPR_CXX_NULL_PTR_LITERAL:
       S = new (Context) CXXNullPtrLiteralExpr(Empty);
       break;

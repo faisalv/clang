@@ -10,6 +10,7 @@
 //===----------------------------------------------------------------------===/
 
 #include "TreeTransform.h"
+#include "clang/AST/APValueVisitor.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclFriend.h"
@@ -33,7 +34,8 @@
 #include "llvm/ADT/StringExtras.h"
 using namespace clang;
 using namespace sema;
-
+//FVTODO: Make this a compiler option
+extern const bool LangOptsAreLiteralTypeNTTPsEnabled = true;
 // Exported for use by Parser.
 SourceRange
 clang::getTemplateParamsRange(TemplateParameterList const * const *Ps,
@@ -640,12 +642,18 @@ Sema::CheckNonTypeTemplateParameterType(QualType T, SourceLocation Loc) {
       T->isNullPtrType() ||
       // If T is a dependent type, we can't do the check now, so we
       // assume that it is well-formed.
-      T->isDependentType()) {
+      T->isDependentType() ||
+      // If the option to all all literal types as nttps (except void) is 
+      // enabled, allow them.
+      (getLangOpts().CPlusPlus1z            && 
+        LangOptsAreLiteralTypeNTTPsEnabled  && 
+        !RequireCompleteType(Loc, T, 0)     &&
+        T->isLiteralType(getASTContext())   && 
+        !T->isVoidType())) {
     // C++ [temp.param]p5: The top-level cv-qualifiers on the template-parameter
     // are ignored when determining its type.
     return T.getUnqualifiedType();
   }
-
   // C++ [temp.param]p8:
   //
   //   A non-type template-parameter of type "array of T" or
@@ -2377,11 +2385,16 @@ static bool isTemplateArgumentTemplateParameter(
     return NTTP && NTTP->getDepth() == Depth && NTTP->getIndex() == Index;
   }
 
-  case TemplateArgument::Template:
+  case TemplateArgument::Template: {
     const TemplateTemplateParmDecl *TTP =
         dyn_cast_or_null<TemplateTemplateParmDecl>(
             Arg.getAsTemplateOrTemplatePattern().getAsTemplateDecl());
     return TTP && TTP->getDepth() == Depth && TTP->getIndex() == Index;
+  }
+  case TemplateArgument::LiteralNonIntegralType: {
+    assert(false && "Handle TemplateArgument::literal or struct union types");
+  }
+
   }
   llvm_unreachable("unexpected kind of template argument");
 }
@@ -3536,6 +3549,9 @@ bool Sema::CheckTemplateArgument(NamedDecl *Param,
 
     case TemplateArgument::Pack:
       llvm_unreachable("Caller must expand template argument packs");
+    case TemplateArgument::LiteralNonIntegralType: {
+      assert(false && "Handle TemplateArgument::literal or struct union types");
+    }
     }
 
     return false;
@@ -3595,6 +3611,10 @@ bool Sema::CheckTemplateArgument(NamedDecl *Param,
 
   case TemplateArgument::Pack:
     llvm_unreachable("Caller must expand template argument packs");
+  case TemplateArgument::LiteralNonIntegralType: {
+    assert(false && "Handle TemplateArgument::literal or struct union types");
+  }
+
   }
 
   return false;
@@ -4784,6 +4804,164 @@ static bool CheckTemplateArgumentPointerToMember(Sema &S,
   return true;
 }
 
+
+// Replace a StringLiteral with an InitListExpr
+
+CharacterLiteral::CharacterKind
+mapStringLiteralKindToCharacterLiteralKind(StringLiteral::StringKind SK) {
+  
+  switch(SK) {
+  case StringLiteral::Ascii:
+    return CharacterLiteral::Ascii;
+  case StringLiteral::Wide:
+    return CharacterLiteral::Wide;
+  case StringLiteral::UTF8:
+    return CharacterLiteral::Ascii;
+  case StringLiteral::UTF16:
+    return CharacterLiteral::UTF16;
+  case StringLiteral::UTF32: 
+    return CharacterLiteral::UTF32;
+  }
+  llvm_unreachable("Unable to map string literal to character literal");
+}
+
+InitListExpr *
+replaceStringLiteralWithCharacterLiteralInitList(const StringLiteral *E, ASTContext &Ctx) {
+  CharacterLiteral::CharacterKind CK =
+      mapStringLiteralKindToCharacterLiteralKind(E->getKind());
+  SmallVector<Expr *, 257> CharExprs;
+  QualType CharTy;
+  if (E->isWide())
+    CharTy = Ctx.WideCharTy; // L'x' -> wchar_t in C and C++.
+  else if (E->isUTF16())
+    CharTy = Ctx.Char16Ty; // u'x' -> char16_t in C11 and C++11.
+  else if (E->isUTF32())
+    CharTy = Ctx.Char32Ty; // U'x' -> char32_t in C11 and C++11.
+  else
+    CharTy = Ctx.CharTy;  // 'x' -> char in C++
+  for (unsigned I = 0, N = E->getLength(); I != N; ++I) {
+    // FVTODO: The location below should be the location of the individual byte
+    CharacterLiteral *CL = new (Ctx)
+        CharacterLiteral(E->getCodeUnit(I), CK, CharTy, E->getExprLoc());
+    CharExprs.push_back(CL);
+  }
+  CharExprs.push_back(new (Ctx) CharacterLiteral(0, CK, CharTy, E->getLocEnd()));
+  InitListExpr *ILE =
+      new (Ctx) InitListExpr(Ctx, E->getLocStart(), CharExprs, E->getLocEnd());
+  //ILE->setType(QualType(Ctx.getAsConstantArrayType(CharTy), 0));
+  ILE->setType(Ctx.VoidTy);
+  return ILE;
+}
+
+struct APValChecker : APValueVisitor<APValChecker> {
+  Sema &S;
+  const QualType NTTPType;
+  const SourceLocation LocStart;
+  const SourceRange LocRange;
+  DiagnosticErrorTrap ErrorTrap;
+  APValChecker(Sema &S, QualType ParamType, SourceLocation LocStart,
+               SourceRange LocRange)
+      : S(S), NTTPType(ParamType), LocStart(LocStart), LocRange(LocRange),
+        ErrorTrap(S.getDiagnostics()) {}
+
+  template <int N> bool Error(const char(&Msg)[N]) {
+    DiagnosticsEngine &Diags = S.getDiagnostics();
+    unsigned DiagID = Diags.getCustomDiagID(DiagnosticsEngine::Error, Msg);
+    S.Diags.Report(LocStart, DiagID) << LocRange;
+    return false;
+  }
+
+#define UNIMPLEMENTED_NON_TYPE_TEMPLATE_ARG(X)                                 \
+  Error("sorry, can not handle " #X " template argument yet") /**/
+
+  bool VisitVector(APValueParamTy AP) {
+    return UNIMPLEMENTED_NON_TYPE_TEMPLATE_ARG(Vector);
+  }
+  bool VisitComplexInt(APValueParamTy AP) {
+
+    return UNIMPLEMENTED_NON_TYPE_TEMPLATE_ARG(ComplexInt);
+  }
+  bool VisitComplexFloat(APValueParamTy AP) {
+    return UNIMPLEMENTED_NON_TYPE_TEMPLATE_ARG(ComplexFloat);
+  }
+
+  bool VisitAddrLabelDiff(APValueParamTy AP) {
+    return UNIMPLEMENTED_NON_TYPE_TEMPLATE_ARG(AddrLabelDiff);
+  }
+#undef UNIMPLEMENTED_NON_TYPE_TEMPLATE_ARG
+  // Check that data members do not contain the address of a string literal
+  bool VisitStructField(APValueParamTy V, const FieldDecl *FD) {
+    if (isStringLiteral(V)) {
+      if (!FD->getType()->isConstantArrayType()) {
+        S.Diag(LocStart, diag::err_template_arg_has_string_literal_address)
+            << LocRange;
+        return false;
+      }
+      // if it is being used to initialize an array - it is ok.
+      return true;
+    }
+    return BaseTy::VisitStructField(V, FD);
+  }
+  bool VisitUnionField(APValueParamTy V, const FieldDecl *FD) {
+    if (isStringLiteral(V))
+      return VisitStructField(V, FD);
+    return BaseTy::VisitUnionField(V, FD);
+  }
+
+  bool VisitLValueRootExpr(APValueParamTy V, const Expr *E) {
+    // Only allow string literals that are being used to initialize arrays of
+    // char TODO: What about PredefinedExprs such as __func__??? we should allow
+    // them if we do not take their address...
+    if (isa<StringLiteral>(E->IgnoreParens())) {
+      if (V.hasLValuePath()) {
+        // We need to check for array type here since 'const char (*a)[5] =
+        //   &"abcd";' does not end up having a path size for "abcd"!
+        if (!NTTPType->isArrayType() || V.getLValuePath().size()) {
+          S.Diag(LocStart, diag::err_template_arg_has_string_literal_address)
+              << LocRange;
+          return false;
+        }
+      }
+      return BaseTy::VisitLValueRootExpr(V, E);
+    }
+    // Don't allow lvalues of any other expressions
+    S.Diag(LocStart, diag::err_template_arg_not_decl_ref) << LocRange;
+    return false;
+  }
+
+  bool VisitLValue(APValueParamTy V) {
+    if (V.isLValueOnePastTheEnd()) {
+      S.Diag(LocStart, diag::err_template_arg_must_not_have_one_past_end)
+          << LocRange;
+      return false;
+    }
+    return BaseTy::VisitLValue(V);
+  }
+  bool VisitLValueDeclFieldSubObj(APValueParamTy AP, const ValueDecl *RootDecl,
+                                  const FieldDecl *FD, unsigned PathIndex,
+                                  unsigned NumPaths) {
+    // Do not allow addresses of variant members or union data members.
+    if (FD->getParent()->isUnion()) {
+      S.Diag(LocStart,
+             diag::err_template_arg_must_not_have_address_of_union_mem)
+          << LocRange;
+      return false;
+    }
+    return BaseTy::VisitLValueDeclFieldSubObj(AP, RootDecl, FD, PathIndex,
+                                              NumPaths);
+  }
+  bool errorOccurred() const { return ErrorTrap.hasErrorOccurred(); }
+};
+
+// Returns true if there was an error and diagnoses it.
+bool CheckAPValueAsTemplateArgument(Sema &S, const APValue &V, 
+                                    QualType ParamType, SourceLocation LocStart,
+                                    SourceRange LocRange) {
+  struct APValChecker APValChecker(S, ParamType, LocStart, LocRange);
+  APValChecker.Visit(V);
+  return APValChecker.errorOccurred();
+}
+
 /// \brief Check a template argument against its corresponding
 /// non-type template parameter.
 ///
@@ -4834,17 +5012,78 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
       return Arg;
     }
 
+    APValue Value;
+    ExprResult ArgResult = ExprError();
+    QualType CanonParamType = Context.getCanonicalType(ParamType);
+    Expr *ArgNaked = Arg->IgnoreParens();    
+    
+    if (LangOptsAreLiteralTypeNTTPsEnabled) {
+      // Handle Array types specially ...
+      
+      if (CanonParamType->isArrayType() && !isa<InitListExpr>(ArgNaked) &&
+          Context.hasSameUnqualifiedType(CanonParamType, ArgNaked->getType())) {
+        // FVTODO: We allow non-type template parameters to be intialized by variables
+        // that refer to arrays or stringliterals But - check if we have a
+        // declrefexpr or a memberrefexpr - and whether we can copy enough
+        // elements - but no more - i.e. check if the array type is compatible -
+        // initially we can require them to be the same and then relax it if we
+        // need to?
+        Expr::EvalResult ER;
+        if (ArgNaked->EvaluateAsRValue(ER, getASTContext())) {
+          ArgResult = ArgNaked;
+          Value = ER.Val;
+        } else {
+          Diag(Arg->getLocStart(), diag::err_expr_not_cce)
+                <<  CCEK_TemplateArg << Arg->getSourceRange();
+        }
+      } else {
+        llvm::SmallVector<PartialDiagnosticAt, 4> PartialDiagNotes;
+        // We perform initialization as if we have a local constexpr VarDecl of
+        // same type as the NNTP FVTODO: We could make the NNTP be of AutoType
+        // too - and if so we always deduce the type. FVTODO: Now that we are
+        // creating a VarDecl - revert EvaluateAsInitializer to taking a VarDecl
+        IdentifierInfo *InventedVarII = &Context.Idents.get("$fv$NTTP$");
+        
+        // Do NOT use Param->getType() instead of ParamType - which is transformed when called
+        // template<class T, T t> struct ...
+
+        VarDecl *NTTPVar = VarDecl::Create(
+            getASTContext(), Param->getDeclContext(), Arg->getLocStart(),
+            Arg->getLocStart(), InventedVarII, ParamType,
+            Param->getTypeSourceInfo(), SC_Auto);
+        NTTPVar->setConstexpr(true);
+        DiagnosticErrorTrap ErrorTrap(getDiagnostics());
+        AddInitializerToDecl(NTTPVar, Arg, /*DirectInit*/ true,
+                             /*TypeMayContainAuto*/ false);
+        Expr *InitExpr = NTTPVar->getInit();
+        if (InitExpr && !ErrorTrap.hasErrorOccurred() &&
+            InitExpr->EvaluateAsInitializer(Value, getASTContext(), NTTPVar,
+                                            PartialDiagNotes)) {
+          if (PartialDiagNotes.size()) {
+            Diag(Arg->getLocStart(), diag::err_expr_not_cce)
+                <<  CCEK_TemplateArg << Arg->getSourceRange();
+            for (unsigned I = 0; I < PartialDiagNotes.size(); ++I)
+              Diag(PartialDiagNotes[I].first, PartialDiagNotes[I].second);
+          } else
+            ArgResult = InitExpr;
+        }
+      }
+    } else {
     // C++1z [temp.arg.nontype]p1:
     //   A template-argument for a non-type template parameter shall be
     //   a converted constant expression of the type of the template-parameter.
-    APValue Value;
-    ExprResult ArgResult = CheckConvertedConstantExpression(
-        Arg, ParamType, Value, CCEK_TemplateArg);
+      ArgResult = CheckConvertedConstantExpression(Arg, ParamType, Value,
+                                                   CCEK_TemplateArg);
+    }
+
     if (ArgResult.isInvalid())
       return ExprError();
-
-    QualType CanonParamType = Context.getCanonicalType(ParamType);
-
+    if (LangOptsAreLiteralTypeNTTPsEnabled) {
+      if (CheckAPValueAsTemplateArgument(*this, Value, ParamType,
+                                         Arg->getLocStart(),
+                                         Arg->getSourceRange()))
+        return ExprError();
+    }
     // Convert the APValue to a TemplateArgument.
     switch (Value.getKind()) {
     case APValue::Uninitialized:
@@ -4855,11 +5094,22 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
       assert(ParamType->isIntegralOrEnumerationType());
       Converted = TemplateArgument(Context, Value.getInt(), CanonParamType);
       break;
+    case APValue::Struct:
+      assert(ParamType->getAsCXXRecordDecl());
+      Converted = TemplateArgument(Context, Value, CanonParamType,
+                                   /*LValueInit*/ nullptr);
+      break;
     case APValue::MemberPointer: {
       assert(ParamType->isMemberPointerType());
+      if (LangOptsAreLiteralTypeNTTPsEnabled) {
+        auto *VD = const_cast<ValueDecl *>(Value.getMemberPointerDecl());
+        Converted = VD ? TemplateArgument(Context, Value, CanonParamType,
+                                          /*LValueInit*/ nullptr)
+                       : TemplateArgument(CanonParamType, /*isNullPtr*/ true);
 
-      // FIXME: We need TemplateArgument representation and mangling for these.
-      if (!Value.getMemberPointerPath().empty()) {
+        break;
+      } else if (!Value.getMemberPointerPath().empty()) {
+        // FIXME: We need TemplateArgument representation and mangling for these.
         Diag(Arg->getLocStart(),
              diag::err_template_arg_member_ptr_base_derived_not_supported)
             << Value.getMemberPointerDecl() << ParamType
@@ -4873,10 +5123,14 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
       break;
     }
     case APValue::LValue: {
+      // FVTODO: Factor this lvalue check out - and make sure if we have a
+      // struct - that any Lvalue contained within it does not violate one of
+      // these lvalue checks.
+
       //   For a non-type template-parameter of pointer or reference type,
       //   the value of the constant expression shall not refer to
-      assert(ParamType->isPointerType() || ParamType->isReferenceType() ||
-             ParamType->isNullPtrType());
+      assert(LangOptsAreLiteralTypeNTTPsEnabled || ParamType->isPointerType() ||
+             ParamType->isReferenceType() || ParamType->isNullPtrType());
       // -- a temporary object
       // -- a string literal
       // -- the result of a typeid expression, or
@@ -4886,24 +5140,41 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
           Converted = TemplateArgument(const_cast<Expr*>(E));
           break;
         }
+        if (LangOptsAreLiteralTypeNTTPsEnabled && isa<StringLiteral>(E)) {
+          // FIXME: Get rid of this const_cast
+          Converted = TemplateArgument(Context, Value, CanonParamType,
+                                       /*LValueInit*/ const_cast<Expr *>(E));
+          break;
+        }
+
         Diag(Arg->getLocStart(), diag::err_template_arg_not_decl_ref)
           << Arg->getSourceRange();
         return ExprError();
       }
       auto *VD = const_cast<ValueDecl *>(
           Value.getLValueBase().dyn_cast<const ValueDecl *>());
+      
+      if (LangOptsAreLiteralTypeNTTPsEnabled) {
+        if (!VD) { // Nullptr
+          assert(CanonParamType->isPointerType() || CanonParamType->isNullPtrType());
+          Converted = TemplateArgument(CanonParamType, /*isNullPtr*/true);
+        }
+        else 
+          Converted = TemplateArgument(Context, Value, CanonParamType, 
+                      /*Initializer Expression*/ArgResult.get());
+        break;
+      }
       // -- a subobject
       if (Value.hasLValuePath() && Value.getLValuePath().size() == 1 &&
-          VD && VD->getType()->isArrayType() &&
-          Value.getLValuePath()[0].ArrayIndex == 0 &&
-          !Value.isLValueOnePastTheEnd() && ParamType->isPointerType()) {
-        // Per defect report (no number yet):
-        //   ... other than a pointer to the first element of a complete array
-        //       object.
+               VD && VD->getType()->isArrayType() &&
+               Value.getLValuePath()[0].ArrayIndex == 0 &&
+               !Value.isLValueOnePastTheEnd() && ParamType->isPointerType()) {
+        // Per defect report (no number yet): ... other than a pointer to the
+        //   first element of a complete array object.
       } else if (!Value.hasLValuePath() || Value.getLValuePath().size() ||
                  Value.isLValueOnePastTheEnd()) {
         Diag(StartLoc, diag::err_non_type_template_arg_subobject)
-          << Value.getAsString(Context, ParamType);
+            << Value.getAsString(Context, ParamType);
         return ExprError();
       }
       assert((VD || !ParamType->isReferenceType()) &&
@@ -4916,14 +5187,17 @@ ExprResult Sema::CheckTemplateArgument(NonTypeTemplateParmDecl *Param,
     }
     case APValue::AddrLabelDiff:
       return Diag(StartLoc, diag::err_non_type_template_arg_addr_label_diff);
-    case APValue::Float:
     case APValue::ComplexInt:
     case APValue::ComplexFloat:
     case APValue::Vector:
+      //return Diag(StartLoc, diag::err_non_type_template_arg_invalid);
+      llvm_unreachable("Invalid type for non-type template argument");
+    case APValue::Float:
     case APValue::Array:
-    case APValue::Struct:
     case APValue::Union:
-      llvm_unreachable("invalid kind for template argument");
+      Converted = TemplateArgument(Context, Value, CanonParamType,
+                                   /*LValueInit*/ nullptr);
+      break;
     }
 
     return ArgResult.get();
@@ -5324,9 +5598,7 @@ Sema::BuildExpressionFromDeclTemplateArgument(const TemplateArgument &Arg,
   }
   assert(Arg.getKind() == TemplateArgument::Declaration &&
          "Only declaration template arguments permitted here");
-
   ValueDecl *VD = cast<ValueDecl>(Arg.getAsDecl());
-
   if (VD->getDeclContext()->isRecord() &&
       (isa<CXXMethodDecl>(VD) || isa<FieldDecl>(VD) ||
        isa<IndirectFieldDecl>(VD))) {

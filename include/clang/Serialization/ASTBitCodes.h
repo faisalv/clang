@@ -1319,6 +1319,7 @@ namespace clang {
       /// \brief A CXXBoolLiteralExpr record.
       EXPR_CXX_BOOL_LITERAL,
       EXPR_CXX_NULL_PTR_LITERAL,  // CXXNullPtrLiteralExpr
+      EXPR_CXX_LITERAL_TYPE_CONSTANT, // CXXLiteralTypeConstantExpr
       EXPR_CXX_TYPEID_EXPR,       // CXXTypeidExpr (of expr).
       EXPR_CXX_TYPEID_TYPE,       // CXXTypeidExpr (of type).
       EXPR_CXX_THIS,              // CXXThisExpr

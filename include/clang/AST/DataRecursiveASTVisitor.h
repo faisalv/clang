@@ -703,7 +703,9 @@ bool RecursiveASTVisitor<Derived>::TraverseTemplateArgument(
   case TemplateArgument::Integral:
   case TemplateArgument::NullPtr:
     return true;
-
+  case TemplateArgument::LiteralNonIntegralType:
+    assert(false && "Teach DatasRecursiveASTVisitor to handle "
+                    "TemplateArgument::LiteralStruct");
   case TemplateArgument::Type:
     return getDerived().TraverseType(Arg.getAsType());
 
@@ -736,7 +738,9 @@ bool RecursiveASTVisitor<Derived>::TraverseTemplateArgumentLoc(
   case TemplateArgument::Integral:
   case TemplateArgument::NullPtr:
     return true;
-
+  case TemplateArgument::LiteralNonIntegralType:
+    assert(false && "Teach DataRecursiveASTVisitor to handle "
+                    "TemplateArgument::LiteralStruct Loc");
   case TemplateArgument::Type: {
     // FIXME: how can TSI ever be NULL?
     if (TypeSourceInfo *TSI = ArgLoc.getTypeSourceInfo())
@@ -2220,6 +2224,7 @@ DEF_TRAVERSE_STMT(CXXDefaultInitExpr, {})
 DEF_TRAVERSE_STMT(CXXDeleteExpr, {})
 DEF_TRAVERSE_STMT(ExprWithCleanups, {})
 DEF_TRAVERSE_STMT(CXXNullPtrLiteralExpr, {})
+DEF_TRAVERSE_STMT(CXXLiteralTypeConstantExpr, {})
 DEF_TRAVERSE_STMT(CXXStdInitializerListExpr, {})
 DEF_TRAVERSE_STMT(CXXPseudoDestructorExpr, {
   TRY_TO(TraverseNestedNameSpecifierLoc(S->getQualifierLoc()));

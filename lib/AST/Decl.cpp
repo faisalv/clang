@@ -322,6 +322,9 @@ static LinkageInfo getLVForTemplateArgumentList(ArrayRef<TemplateArgument> Args,
     case TemplateArgument::Null:
     case TemplateArgument::Integral:
     case TemplateArgument::Expression:
+    // FVQUESTION: What linkage should templates instanstiated with literal
+    // structs have?
+    case TemplateArgument::LiteralNonIntegralType:
       continue;
 
     case TemplateArgument::Type:

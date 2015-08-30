@@ -932,7 +932,7 @@ namespace {
         V = APValue(Base, Offset, APValue::NoLValuePath(), CallIndex);
       else
         V = APValue(Base, Offset, Designator.Entries,
-                    Designator.IsOnePastTheEnd, CallIndex);
+                    Designator.isOnePastTheEnd(), CallIndex);
     }
     void setFrom(ASTContext &Ctx, const APValue &V) {
       assert(V.isLValue());
@@ -2576,7 +2576,16 @@ static CompleteObject findCompleteObject(EvalInfo &Info, const Expr *E,
         // All the remaining cases only permit reading.
         Info.Diag(E, diag::note_constexpr_modify_global);
         return CompleteObject();
-      } else if (VD->isConstexpr()) {
+      } else if (VD->isConstexpr() || (VD->getType().isConstQualified() &&
+                                       !VD->getType().isVolatileQualified() &&
+                                       ([](const VarDecl *VD) {
+                                         const VarDecl *VDef;
+                                         // Does this variable have a constant
+                                         // initalizer?
+                                         if (VD->getAnyInitializer(VDef))
+                                           return VDef->checkInitIsICE();
+                                         return false;
+                                       }(VD)))) {
         // OK, we can read this variable.
       } else if (BaseType->isIntegralOrEnumerationType()) {
         if (!BaseType.isConstQualified()) {
@@ -3819,7 +3828,7 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
   // Reserve space for the struct members.
   if (!RD->isUnion() && Result.isUninit())
     Result = APValue(APValue::UninitStruct(), RD->getNumBases(),
-                     std::distance(RD->field_begin(), RD->field_end()));
+                     std::distance(RD->field_begin(), RD->field_end()), RD);
 
   if (RD->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
@@ -3878,7 +3887,8 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
             *Value = APValue(FD);
           else
             *Value = APValue(APValue::UninitStruct(), CD->getNumBases(),
-                             std::distance(CD->field_begin(), CD->field_end()));
+                             std::distance(CD->field_begin(), CD->field_end()),
+                             CD);
         }
         if (!HandleLValueMember(Info, I->getInit(), Subobject, FD))
           return false;
@@ -5088,7 +5098,13 @@ public:
   bool ZeroInitialization(const Expr *E) {
     return Success((const ValueDecl*)nullptr);
   }
-
+  bool VisitCXXLiteralTypeConstantExpr(const CXXLiteralTypeConstantExpr *E) {
+    const APValue &V = E->getValue();
+    if (V.isMemberPointer()) {
+      return Success(V, E);
+    }
+    return Error(E);
+  }
   bool VisitCastExpr(const CastExpr *E);
   bool VisitUnaryAddrOf(const UnaryOperator *E);
 };
@@ -5178,6 +5194,9 @@ namespace {
     bool VisitInitListExpr(const InitListExpr *E);
     bool VisitCXXConstructExpr(const CXXConstructExpr *E);
     bool VisitCXXStdInitializerListExpr(const CXXStdInitializerListExpr *E);
+    bool VisitCXXLiteralTypeConstantExpr(const CXXLiteralTypeConstantExpr *E) {
+      return Success(E->getValue(), E);
+    }
   };
 }
 
@@ -5194,7 +5213,7 @@ static bool HandleClassZeroInitialization(EvalInfo &Info, const Expr *E,
   assert(!RD->isUnion() && "Expected non-union class type");
   const CXXRecordDecl *CD = dyn_cast<CXXRecordDecl>(RD);
   Result = APValue(APValue::UninitStruct(), CD ? CD->getNumBases() : 0,
-                   std::distance(RD->field_begin(), RD->field_end()));
+                   std::distance(RD->field_begin(), RD->field_end()), CD);
 
   if (RD->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
@@ -5324,7 +5343,8 @@ bool RecordExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
   assert((!isa<CXXRecordDecl>(RD) || !cast<CXXRecordDecl>(RD)->getNumBases()) &&
          "initializer list for class with base classes");
   Result = APValue(APValue::UninitStruct(), 0,
-                   std::distance(RD->field_begin(), RD->field_end()));
+                   std::distance(RD->field_begin(), RD->field_end()), 
+                   RD);
   unsigned ElementNo = 0;
   bool Success = true;
   for (const auto *Field : RD->fields()) {
@@ -5432,7 +5452,8 @@ bool RecordExprEvaluator::VisitCXXStdInitializerListExpr(
     return Error(E);
 
   // FIXME: What if the initializer_list type has base classes, etc?
-  Result = APValue(APValue::UninitStruct(), 0, 2);
+  Result = APValue(APValue::UninitStruct(), 0, 2, 
+                   dyn_cast<CXXRecordDecl>(Record));
   Array.moveInto(Result.getStructField(0));
 
   if (++Field == Record->field_end())
@@ -5506,6 +5527,9 @@ public:
     return VisitConstructExpr(E);
   }
   bool VisitCXXStdInitializerListExpr(const CXXStdInitializerListExpr *E) {
+    return VisitConstructExpr(E);
+  }
+  bool VisitCXXLiteralTypeConstantExpr(const CXXLiteralTypeConstantExpr *E) {
     return VisitConstructExpr(E);
   }
 };
@@ -5744,6 +5768,28 @@ namespace {
     bool VisitCXXConstructExpr(const CXXConstructExpr *E,
                                const LValue &Subobject,
                                APValue *Value, QualType Type);
+    bool VisitCXXLiteralTypeConstantExpr(const CXXLiteralTypeConstantExpr *E) {
+      return Success(E->getValue(), E);
+    }
+    
+    // The absence of this function is a bug in clang-trunk. When a
+    // default-member-initializer of a non-static data member that is an array
+    // is being evaluated - and the initializer is a string literal, evaluate
+    // the string literal as an lvalue and movei it into the APValue.
+
+    // constexpr struct C {
+    //   char c[5] = "abc";
+    // } GC{};
+    //
+    bool VisitStringLiteral(const StringLiteral *E) {
+      LValue LV;
+      if (!EvaluateLValue(E, LV, Info))
+        return false;
+      APValue Val;
+      LV.moveInto(Val);
+      return Success(Val, E);
+    }
+    
   };
 } // end anonymous namespace
 
@@ -8860,6 +8906,7 @@ static ICEDiag CheckICE(const Expr* E, const ASTContext &Ctx) {
     return CheckICE(cast<GenericSelectionExpr>(E)->getResultExpr(), Ctx);
   case Expr::IntegerLiteralClass:
   case Expr::CharacterLiteralClass:
+  case Expr::CXXLiteralTypeConstantExprClass:
   case Expr::ObjCBoolLiteralExprClass:
   case Expr::CXXBoolLiteralExprClass:
   case Expr::CXXScalarValueInitExprClass:

@@ -1092,6 +1092,13 @@ void StmtProfiler::VisitCXXBoolLiteralExpr(const CXXBoolLiteralExpr *S) {
 void StmtProfiler::VisitCXXNullPtrLiteralExpr(const CXXNullPtrLiteralExpr *S) {
   VisitExpr(S);
 }
+void StmtProfiler::VisitCXXLiteralTypeConstantExpr(const CXXLiteralTypeConstantExpr *S) {
+  VisitType(S->getType());
+  VisitExpr(S);
+  // FVTODO: get the APValue of the class prvalue and profile it by Iterating
+  // through all the bases and fields
+}
+
 
 void StmtProfiler::VisitCXXStdInitializerListExpr(
     const CXXStdInitializerListExpr *S) {
@@ -1553,6 +1560,10 @@ void StmtProfiler::VisitTemplateArgument(const TemplateArgument &Arg) {
   case TemplateArgument::Pack:
     for (const auto &P : Arg.pack_elements())
       VisitTemplateArgument(P);
+    break;
+  case TemplateArgument::LiteralNonIntegralType:
+    Arg.getAsAPValue().ProfileAsNonTypeTemplateArgument(ID, Context);
+    VisitType(Arg.getLiteralNonIntegralType());
     break;
   }
 }

@@ -954,7 +954,11 @@ void ASTDumper::dumpTemplateArgument(const TemplateArgument &A, SourceRange R) {
            I != E; ++I)
         dumpTemplateArgument(*I);
       break;
+
+    case TemplateArgument::LiteralNonIntegralType: {
+      assert(false && "Handle dumping literal or struct union types");
     }
+  }
   });
 }
 

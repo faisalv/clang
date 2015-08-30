@@ -68,9 +68,29 @@ static void printIntegral(const TemplateArgument &TemplArg,
 //===----------------------------------------------------------------------===//
 // TemplateArgument Implementation
 //===----------------------------------------------------------------------===//
+TemplateArgument::TemplateArgument(const TemplateArgument &Other, QualType Type) {
+  if (Type->getAsCXXRecordDecl()) {
+    NonIntegralLiteralData = Other.NonIntegralLiteralData;
+    NonIntegralLiteralData.Type = Type.getAsOpaquePtr();
+  } else {
+    Integer = Other.Integer;
+    Integer.Type = Type.getAsOpaquePtr();
+  }
+}
+
+TemplateArgument::TemplateArgument(ASTContext &Ctx, const APValue &Value,
+                                   QualType Type, Expr *LValueInitExpr) {
+  assert(Type.isCanonical());
+  NonIntegralLiteralData.Kind = LiteralNonIntegralType;
+  NonIntegralLiteralData.VAL = new(Ctx) APValue(Value);
+  NonIntegralLiteralData.Type = Type.getAsOpaquePtr();
+  assert((!LValueInitExpr || Value.isLValue()) && "Must be LValue if setting init expr");
+  NonIntegralLiteralData.LValueInitExpr = LValueInitExpr; // FVTODO: This could be set here?
+}
 
 TemplateArgument::TemplateArgument(ASTContext &Ctx, const llvm::APSInt &Value,
                                    QualType Type) {
+  assert(Type.isCanonical());
   Integer.Kind = Integral;
   // Copy the APSInt value into our decomposed form.
   Integer.BitWidth = Value.getBitWidth();
@@ -121,6 +141,7 @@ bool TemplateArgument::isDependent() const {
     return false;
 
   case Integral:
+  case LiteralNonIntegralType:
     // Never dependent
     return false;
 
@@ -161,6 +182,7 @@ bool TemplateArgument::isInstantiationDependent() const {
     return false;
       
   case Integral:
+  case LiteralNonIntegralType:
     // Never dependent
     return false;
     
@@ -185,6 +207,7 @@ bool TemplateArgument::isPackExpansion() const {
   case Pack:    
   case Template:
   case NullPtr:
+  case LiteralNonIntegralType:
     return false;
       
   case TemplateExpansion:
@@ -205,6 +228,7 @@ bool TemplateArgument::containsUnexpandedParameterPack() const {
   case Null:
   case Declaration:
   case Integral:
+  case LiteralNonIntegralType:
   case TemplateExpansion:
   case NullPtr:
     break;
@@ -293,6 +317,11 @@ void TemplateArgument::Profile(llvm::FoldingSetNodeID &ID,
     ID.AddInteger(Args.NumArgs);
     for (unsigned I = 0; I != Args.NumArgs; ++I)
       Args.Args[I].Profile(ID, Context);
+    break;
+  case LiteralNonIntegralType:
+    getAsAPValue().ProfileAsNonTypeTemplateArgument(ID, Context);
+    getLiteralNonIntegralType().Profile(ID);
+    break;
   }
 }
 
@@ -314,13 +343,17 @@ bool TemplateArgument::structurallyEquals(const TemplateArgument &Other) const {
   case Integral:
     return getIntegralType() == Other.getIntegralType() &&
            getAsIntegral() == Other.getAsIntegral();
-
+  case LiteralNonIntegralType:
+    llvm_unreachable("We need to be able to hash through member wise equivalence a struct and all its types");
+    break;
+  
   case Pack:
     if (Args.NumArgs != Other.Args.NumArgs) return false;
     for (unsigned I = 0, E = Args.NumArgs; I != E; ++I)
       if (!Args.Args[I].structurallyEquals(Other.Args.Args[I]))
         return false;
     return true;
+
   }
 
   llvm_unreachable("Invalid TemplateArgument Kind!");
@@ -341,6 +374,7 @@ TemplateArgument TemplateArgument::getPackExpansionPattern() const {
 
   case Declaration:
   case Integral:
+  case LiteralNonIntegralType:
   case Pack:
   case Null:
   case Template:
@@ -394,7 +428,11 @@ void TemplateArgument::print(const PrintingPolicy &Policy,
     printIntegral(*this, Out, Policy);
     break;
   }
-    
+  case LiteralNonIntegralType: {
+    getAsAPValue().dump(Out);
+    //FVTODO: getAsAPValue().printPretty(Out, ASTContext!!, getLiteralNonIntegralType());
+    break;
+  }
   case Expression:
     getAsExpr()->printPretty(Out, nullptr, Policy);
     break;
@@ -454,6 +492,9 @@ SourceRange TemplateArgumentLoc::getSourceRange() const {
 
   case TemplateArgument::Integral:
     return getSourceIntegralExpression()->getSourceRange();
+  
+  case TemplateArgument::LiteralNonIntegralType:
+    return getSourceLiteralExpression()->getSourceRange();
 
   case TemplateArgument::Pack:
   case TemplateArgument::Null:
@@ -482,7 +523,12 @@ const DiagnosticBuilder &clang::operator<<(const DiagnosticBuilder &DB,
       
   case TemplateArgument::Integral:
     return DB << Arg.getAsIntegral().toString(10);
-      
+  case TemplateArgument::LiteralNonIntegralType: {
+    SmallString<32> Str;
+    llvm::raw_svector_ostream OS(Str);
+    Arg.getAsAPValue().dump(OS);
+    return DB << Str;
+  }
   case TemplateArgument::Template:
     return DB << Arg.getAsTemplate();
 

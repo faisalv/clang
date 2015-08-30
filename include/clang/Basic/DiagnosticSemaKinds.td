@@ -3365,6 +3365,12 @@ def ext_ms_template_type_arg_missing_typename : ExtWarn<
   InGroup<MicrosoftTemplate>;
 def err_template_arg_must_be_expr : Error<
   "template argument for non-type template parameter must be an expression">;
+def err_template_arg_must_not_have_one_past_end : Error<
+  "template argument for non-type template parameter must not have one past end pointer">;
+def err_template_arg_has_string_literal_address : Error<
+  "non-type template argument takes address of string literal">;
+def err_template_arg_must_not_have_address_of_union_mem : Error<
+  "template argument for non-type template parameter must not have address of a union member">;
 def err_template_arg_nontype_ambig : Error<
   "template argument for non-type template parameter is treated as function type %0">;
 def err_template_arg_must_be_template : Error<

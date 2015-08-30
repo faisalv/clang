@@ -4303,6 +4303,10 @@ ASTContext::getCanonicalTemplateArgument(const TemplateArgument &Arg) const {
 
     case TemplateArgument::Integral:
       return TemplateArgument(Arg, getCanonicalType(Arg.getIntegralType()));
+    
+    case TemplateArgument::LiteralNonIntegralType:
+      return TemplateArgument(
+          Arg, getCanonicalType(Arg.getLiteralNonIntegralType()));
 
     case TemplateArgument::Type:
       return TemplateArgument(getCanonicalType(Arg.getAsType()));

@@ -5896,6 +5896,7 @@ ASTReader::GetTemplateArgumentLocInfo(ModuleFile &F,
   case TemplateArgument::Declaration:
   case TemplateArgument::NullPtr:
   case TemplateArgument::Pack:
+  case TemplateArgument::LiteralNonIntegralType:
     // FIXME: Is this right?
     return TemplateArgumentLocInfo();
   }

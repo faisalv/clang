@@ -143,10 +143,16 @@ static bool isSameDeclaration(Decl *X, Decl *Y) {
   return X->getCanonicalDecl() == Y->getCanonicalDecl();
 }
 
+static bool hasSameValue(const APValue &L, const APValue &R, ASTContext &Ctx) {
+  llvm::FoldingSetNodeID LID, RID;
+  L.ProfileAsNonTypeTemplateArgument(LID, Ctx);
+  R.ProfileAsNonTypeTemplateArgument(RID, Ctx);
+  return LID == RID;
+}
 /// \brief Verify that the given, deduced template arguments are compatible.
 ///
-/// \returns The deduced template argument, or a NULL template argument if
-/// the deduced template arguments were incompatible.
+/// \returns The deduced template argument, or a NULL template argument if the
+/// deduced template arguments were incompatible.
 static DeducedTemplateArgument
 checkDeducedTemplateArguments(ASTContext &Context,
                               const DeducedTemplateArgument &X,
@@ -183,6 +189,24 @@ checkDeducedTemplateArguments(ASTContext &Context,
 
     // All other combinations are incompatible.
     return DeducedTemplateArgument();
+
+    
+  case TemplateArgument::LiteralNonIntegralType: {
+    // If we deduced a constant in one case and either a dependent expression or
+    // declaration in another case, keep the constant.
+    // If both are constants with the same value, keep that value.
+
+    if (Y.getKind() == TemplateArgument::Expression ||
+        Y.getKind() == TemplateArgument::Declaration ||
+        (Y.getKind() == TemplateArgument::LiteralNonIntegralType &&
+         hasSameValue(X.getAsAPValue(), Y.getAsAPValue(), Context)))
+      return DeducedTemplateArgument(X,
+                                     X.wasDeducedFromArrayBound() &&
+                                     Y.wasDeducedFromArrayBound());
+
+    // All other combinations are incompatible.
+    return DeducedTemplateArgument();
+  }
 
   case TemplateArgument::Template:
     if (Y.getKind() == TemplateArgument::Template &&
@@ -313,6 +337,35 @@ DeduceNonTypeTemplateArgument(Sema &S,
 }
 
 /// \brief Deduce the value of the given non-type template parameter
+/// from the given constant.
+static Sema::TemplateDeductionResult
+DeduceNonTypeTemplateArgument(Sema &S,
+                              NonTypeTemplateParmDecl *NTTP,
+                              const APValue &Value, QualType ValueType, 
+                              Expr *LValueInitExpr,
+                              bool DeducedFromArrayBound,
+                              TemplateDeductionInfo &Info,
+                    SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
+  assert(NTTP->getDepth() == 0 &&
+         "Cannot deduce non-type template argument with depth > 0");
+  TemplateArgument TA(S.Context, Value, ValueType, LValueInitExpr);
+  DeducedTemplateArgument NewDeduced(TA);
+  DeducedTemplateArgument Result = checkDeducedTemplateArguments(S.Context,
+                                                     Deduced[NTTP->getIndex()],
+                                                                 NewDeduced);
+  if (Result.isNull()) {
+    Info.Param = NTTP;
+    Info.FirstArg = Deduced[NTTP->getIndex()];
+    Info.SecondArg = NewDeduced;
+    return Sema::TDK_Inconsistent;
+  }
+
+  Deduced[NTTP->getIndex()] = Result;
+  return Sema::TDK_Success;
+}
+
+
+/// \brief Deduce the value of the given non-type template parameter
 /// from the given type- or value-dependent expression.
 ///
 /// \returns true if deduction succeeded, false otherwise.
@@ -324,8 +377,15 @@ DeduceNonTypeTemplateArgument(Sema &S,
                     SmallVectorImpl<DeducedTemplateArgument> &Deduced) {
   assert(NTTP->getDepth() == 0 &&
          "Cannot deduce non-type template argument with depth > 0");
-  assert((Value->isTypeDependent() || Value->isValueDependent()) &&
+  assert((Value->isTypeDependent() || Value->isValueDependent() || isa<InitListExpr>(Value)) &&
          "Expression template argument must be type- or value-dependent.");
+  
+ 
+  assert((!isa<InitListExpr>(Value) || Value->getType()->isVoidType()) &&
+         "If any Initializer lists make it here, they should be of type void - "
+         "that is they must not have their types deduced such as in the "
+         "following code: template<int N> constexpr auto reverse(Wrapper<const "
+         "Range<int, N>, {1}> w)!");
 
   DeducedTemplateArgument NewDeduced(Value);
   DeducedTemplateArgument Result = checkDeducedTemplateArguments(S.Context,
@@ -1708,6 +1768,7 @@ DeduceTemplateArguments(Sema &S,
     return Sema::TDK_NonDeducedMismatch;
 
   case TemplateArgument::Integral:
+  case TemplateArgument::LiteralNonIntegralType:
     if (Arg.getKind() == TemplateArgument::Integral) {
       if (hasSameExtendedValue(Param.getAsIntegral(), Arg.getAsIntegral()))
         return Sema::TDK_Success;
@@ -1716,7 +1777,11 @@ DeduceTemplateArguments(Sema &S,
       Info.SecondArg = Arg;
       return Sema::TDK_NonDeducedMismatch;
     }
+    if (Arg.getKind() == TemplateArgument::LiteralNonIntegralType) {
+      if (hasSameValue(Arg.getAsAPValue(), Param.getAsAPValue(), S.Context))
+        return Sema::TDK_Success;
 
+    }
     if (Arg.getKind() == TemplateArgument::Expression) {
       Info.FirstArg = Param;
       Info.SecondArg = Arg;
@@ -1736,6 +1801,14 @@ DeduceTemplateArguments(Sema &S,
                                              Arg.getIntegralType(),
                                              /*ArrayBound=*/false,
                                              Info, Deduced);
+      if (Arg.getKind() == TemplateArgument::LiteralNonIntegralType)
+        return DeduceNonTypeTemplateArgument(S, NTTP,
+                                             Arg.getAsAPValue(),
+                                             Arg.getLiteralNonIntegralType(),
+                                             Arg.getLiteralLValueInitExpr(),
+                                             /*ArrayBound=*/false,
+                                             Info, Deduced);
+
       if (Arg.getKind() == TemplateArgument::Expression)
         return DeduceNonTypeTemplateArgument(S, NTTP, Arg.getAsExpr(),
                                              Info, Deduced);
@@ -1960,9 +2033,23 @@ static bool isSameTemplateArg(ASTContext &Context,
           return false;
 
       return true;
+  case TemplateArgument::LiteralNonIntegralType:
+    return hasSameValue(X.getAsAPValue(), Y.getAsAPValue(), Context);
   }
 
   llvm_unreachable("Invalid TemplateArgument Kind!");
+}
+
+static Expr *buildExpressionFromLiteralTypeTemplateArgument(
+    Sema &S, const TemplateArgument &Arg, SourceLocation Loc) {
+  if (Arg.getKind() == TemplateArgument::LiteralNonIntegralType &&
+      Arg.getAsAPValue().isLValue() &&
+      Arg.getAsAPValue().getLValueBase().is<const ValueDecl *>()) {
+    return Arg.getLiteralLValueInitExpr();
+  } else {
+    return new (S.Context) CXXLiteralTypeConstantExpr(
+        Arg.getAsAPValue(), Arg.getLiteralNonIntegralType().withConst(), Loc);
+  }
 }
 
 /// \brief Allocate a TemplateArgumentLoc where all locations have
@@ -2010,6 +2097,11 @@ getTrivialTemplateArgumentLoc(Sema &S,
   case TemplateArgument::Integral: {
     Expr *E
       = S.BuildExpressionFromIntegralTemplateArgument(Arg, Loc).getAs<Expr>();
+    return TemplateArgumentLoc(TemplateArgument(E), E);
+  }
+  case TemplateArgument::LiteralNonIntegralType: {
+    Expr *E = buildExpressionFromLiteralTypeTemplateArgument(S, Arg, Loc);
+    assert(E);
     return TemplateArgumentLoc(TemplateArgument(E), E);
   }
 
@@ -4917,6 +5009,7 @@ MarkUsedTemplateParameters(ASTContext &Ctx,
   case TemplateArgument::Null:
   case TemplateArgument::Integral:
   case TemplateArgument::Declaration:
+  case TemplateArgument::LiteralNonIntegralType:
     break;
 
   case TemplateArgument::NullPtr:

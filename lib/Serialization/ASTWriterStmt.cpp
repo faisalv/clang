@@ -1277,6 +1277,14 @@ void ASTStmtWriter::VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *E) {
   Code = serialization::EXPR_CXX_BOOL_LITERAL;
 }
 
+void ASTStmtWriter::VisitCXXLiteralTypeConstantExpr(CXXLiteralTypeConstantExpr *E) {
+  VisitExpr(E);
+  //FVTODO: We need to be able to write the APValue to the record.
+  //Record.push_back(E->getValue());
+  Writer.AddSourceLocation(E->getLocation(), Record);
+  Code = serialization::EXPR_CXX_LITERAL_TYPE_CONSTANT;
+}
+
 void ASTStmtWriter::VisitCXXNullPtrLiteralExpr(CXXNullPtrLiteralExpr *E) {
   VisitExpr(E);
   Writer.AddSourceLocation(E->getLocation(), Record);

@@ -217,7 +217,10 @@ public:
   Value *VisitGenericSelectionExpr(GenericSelectionExpr *GE) {
     return Visit(GE->getResultExpr());
   }
-
+  Value *VisitCXXLiteralTypeConstantExpr(
+      clang::CXXLiteralTypeConstantExpr *S) {
+    return CGF.CGM.EmitConstantValue(S->getValue(), S->getType(), &CGF);
+  }
   // Leaves.
   Value *VisitIntegerLiteral(const IntegerLiteral *E) {
     return Builder.getInt(E->getValue());

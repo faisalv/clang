@@ -827,6 +827,7 @@ static void AddStmtsExprs(llvm::BitstreamWriter &Stream,
   RECORD(EXPR_CXX_STD_INITIALIZER_LIST);
   RECORD(EXPR_CXX_BOOL_LITERAL);
   RECORD(EXPR_CXX_NULL_PTR_LITERAL);
+  RECORD(EXPR_CXX_LITERAL_TYPE_CONSTANT);
   RECORD(EXPR_CXX_TYPEID_EXPR);
   RECORD(EXPR_CXX_TYPEID_TYPE);
   RECORD(EXPR_CXX_THIS);
@@ -4796,6 +4797,9 @@ void ASTWriter::AddTemplateArgumentLocInfo(TemplateArgument::ArgKind Kind,
   case TemplateArgument::Pack:
     // FIXME: Is this right?
     break;
+  case TemplateArgument::LiteralNonIntegralType:
+    assert(false && "Handle TemplateArgument::LiteralStructType...");
+
   }
 }
 
@@ -5258,6 +5262,9 @@ void ASTWriter::AddTemplateArgument(const TemplateArgument &Arg,
     for (const auto &P : Arg.pack_elements())
       AddTemplateArgument(P, Record);
     break;
+  case TemplateArgument::LiteralNonIntegralType: {
+    assert(false && "Handle literal or struct union types");
+  }
   }
 }
 

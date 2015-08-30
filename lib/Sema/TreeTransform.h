@@ -2864,6 +2864,7 @@ public:
     case TemplateArgument::Pack:
     case TemplateArgument::TemplateExpansion:
     case TemplateArgument::NullPtr:
+    case TemplateArgument::LiteralNonIntegralType:
       llvm_unreachable("Pack expansion pattern has no parameter packs");
 
     case TemplateArgument::Type:
@@ -2874,6 +2875,7 @@ public:
         return TemplateArgumentLoc(TemplateArgument(Expansion->getType()),
                                    Expansion);
       break;
+    
     }
 
     return TemplateArgumentLoc();
@@ -3495,6 +3497,7 @@ void TreeTransform<Derived>::InventTemplateArgumentLoc(
   case TemplateArgument::Integral:
   case TemplateArgument::Pack:
   case TemplateArgument::NullPtr:
+  case TemplateArgument::LiteralNonIntegralType:
     Output = TemplateArgumentLoc(Arg, TemplateArgumentLocInfo());
     break;
   }
@@ -3511,6 +3514,7 @@ bool TreeTransform<Derived>::TransformTemplateArgument(
   case TemplateArgument::Pack:
   case TemplateArgument::Declaration:
   case TemplateArgument::NullPtr:
+  case TemplateArgument::LiteralNonIntegralType:
     llvm_unreachable("Unexpected TemplateArgument");
 
   case TemplateArgument::Type: {
@@ -3563,6 +3567,7 @@ bool TreeTransform<Derived>::TransformTemplateArgument(
     Output = TemplateArgumentLoc(TemplateArgument(E.get()), E.get());
     return false;
   }
+  
   }
 
   // Work around bogus GCC warning
@@ -8723,6 +8728,13 @@ template<typename Derived>
 ExprResult
 TreeTransform<Derived>::TransformCXXNullPtrLiteralExpr(
                                                      CXXNullPtrLiteralExpr *E) {
+  return E;
+}
+
+template<typename Derived>
+ExprResult
+TreeTransform<Derived>::TransformCXXLiteralTypeConstantExpr(
+                                                     CXXLiteralTypeConstantExpr *E) {
   return E;
 }
 

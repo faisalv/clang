@@ -15,6 +15,7 @@
 #ifndef LLVM_CLANG_AST_TEMPLATEBASE_H
 #define LLVM_CLANG_AST_TEMPLATEBASE_H
 
+#include "clang/AST/APValue.h"
 #include "clang/AST/TemplateName.h"
 #include "clang/AST/Type.h"
 #include "llvm/ADT/APSInt.h"
@@ -68,7 +69,11 @@ public:
     Expression,
     /// The template argument is actually a parameter pack. Arguments are stored
     /// in the Args struct.
-    Pack
+    Pack,
+
+    /// The template argument is Non type template argument of literal type that 
+    /// is not of integral, or ptr-to-mem type.
+    LiteralNonIntegralType
   };
 
 private:
@@ -92,6 +97,18 @@ private:
     };
     void *Type;
   };
+
+  // A Literal Type (Non Integral)
+  struct NonIntegralLiteral {
+    unsigned Kind;
+    APValue *VAL;  
+    void *Type;
+    // When the NTTP is an LValue that refers to either a subobject or complete
+    // object, this expression (whcih contains all relevent conversions,
+    // declrefexprs, and member exprs) that was used to initialize the NTTP,
+    // replaces every mention of the NTTP.
+    Expr *LValueInitExpr; 
+  };
   struct A {
     unsigned Kind;
     unsigned NumArgs;
@@ -112,6 +129,7 @@ private:
     struct A Args;
     struct TA TemplateArg;
     struct TV TypeOrValue;
+    struct NonIntegralLiteral NonIntegralLiteralData;
   };
 
   TemplateArgument(TemplateName, bool) = delete;
@@ -143,12 +161,13 @@ public:
   /// store the value is allocated with Ctx.
   TemplateArgument(ASTContext &Ctx, const llvm::APSInt &Value, QualType Type);
 
-  /// \brief Construct an integral constant template argument with the same
-  /// value as Other but a different type.
-  TemplateArgument(const TemplateArgument &Other, QualType Type) {
-    Integer = Other.Integer;
-    Integer.Type = Type.getAsOpaquePtr();
-  }
+  /// Use when creating TemplateArguments of generalized literal types.
+  TemplateArgument(ASTContext &Ctx, const APValue &Value, QualType Type,
+                   Expr *LValueInitExpr);
+
+  /// \brief Construct an integral or literal constant template argument with
+  /// the same value as Other but a different type.
+  TemplateArgument(const TemplateArgument &Other, QualType Type);
 
   /// \brief Construct a template argument that is a template.
   ///
@@ -203,7 +222,16 @@ public:
     this->Args.Args = Args.data();
     this->Args.NumArgs = Args.size();
   }
-
+  /*
+  FVFIXME: The APValue memory leak needs to be cleaned up eventually
+  TemplateArgument(const TemplateArgument &TA);
+  TemplateArgument &operator=(const TemplateArgument &Rhs);
+  TemplateArgument(TemplateArgument &&) = delete;
+  ~TemplateArgument() {
+    if (getKind() == LiteralNonIntegralType)
+      delete NonIntegralLiteralData.VAL;
+  }
+  //*/
   static TemplateArgument getEmptyPack() { return TemplateArgument(None); }
 
   /// \brief Create a new template argument pack by copying the given set of
@@ -300,6 +328,21 @@ public:
     Integer.Type = T.getAsOpaquePtr();
   }
 
+  const APValue &getAsAPValue() const {
+    assert(getKind() == LiteralNonIntegralType && "Unexpected kind");
+    return *NonIntegralLiteralData.VAL;
+  }
+
+  /// \brief Retrieve the type of the literal class value.
+  QualType getLiteralNonIntegralType() const {
+    assert(getKind() == LiteralNonIntegralType && "Unexpected kind");
+    return QualType::getFromOpaquePtr(NonIntegralLiteralData.Type);
+  }
+  Expr *getLiteralLValueInitExpr() const {
+    assert(getKind() == LiteralNonIntegralType && "Unexpected kind");
+    return NonIntegralLiteralData.LValueInitExpr;
+  }
+  
   /// \brief Retrieve the template argument as an expression.
   Expr *getAsExpr() const {
     assert(getKind() == Expression && "Unexpected kind");
@@ -355,6 +398,7 @@ public:
              
   /// \brief Used to insert TemplateArguments into FoldingSets.
   void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Context) const;
+ 
 };
 
 /// Location information for a TemplateArgument.
@@ -490,6 +534,10 @@ public:
 
   Expr *getSourceIntegralExpression() const {
     assert(Argument.getKind() == TemplateArgument::Integral);
+    return LocInfo.getAsExpr();
+  }
+  Expr *getSourceLiteralExpression() const {
+    assert(Argument.getKind() == TemplateArgument::LiteralNonIntegralType);
     return LocInfo.getAsExpr();
   }
 

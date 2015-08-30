@@ -1758,6 +1758,11 @@ void StmtPrinter::VisitCXXBoolLiteralExpr(CXXBoolLiteralExpr *Node) {
 void StmtPrinter::VisitCXXNullPtrLiteralExpr(CXXNullPtrLiteralExpr *Node) {
   OS << "nullptr";
 }
+void StmtPrinter::VisitCXXLiteralTypeConstantExpr(CXXLiteralTypeConstantExpr *Node) {
+  OS << "LiteralNonIntPtrRefType ";
+  Node->getValue().dump(OS);
+}
+
 
 void StmtPrinter::VisitCXXThisExpr(CXXThisExpr *Node) {
   OS << "this";

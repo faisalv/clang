@@ -115,6 +115,19 @@ public:
   void VisitSubstNonTypeTemplateParmExpr(SubstNonTypeTemplateParmExpr *E) {
     return Visit(E->getReplacement());
   }
+  void VisitCXXLiteralTypeConstantExpr(CXXLiteralTypeConstantExpr *E) {
+    llvm::Constant* C = CGF.CGM.EmitConstantValue(E->getValue(), E->getType(), &CGF);
+    assert(C);
+    // FVFIXME: We currently just create a global variable for each emission
+    // which seems horribly slow.  If it is,  we could be much smarter about
+    // when we emit a new global variable and when we just refer to one already
+    // created.
+    llvm::GlobalVariable *GV = new llvm::GlobalVariable(
+        CGF.CGM.getModule(), C->getType(), true,
+        llvm::GlobalValue::InternalLinkage, C, ".ltce-lval");
+    EmitFinalDestCopy(E->getType(), CGF.MakeAddrLValue(GV, E->getType()));
+    
+  }
 
   // l-values.
   void VisitDeclRefExpr(DeclRefExpr *E) {

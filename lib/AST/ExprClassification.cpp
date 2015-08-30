@@ -152,6 +152,7 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
   case Expr::CXXNewExprClass:
   case Expr::CXXThisExprClass:
   case Expr::CXXNullPtrLiteralExprClass:
+  case Expr::CXXLiteralTypeConstantExprClass:
   case Expr::ImaginaryLiteralClass:
   case Expr::GNUNullExprClass:
   case Expr::OffsetOfExprClass:

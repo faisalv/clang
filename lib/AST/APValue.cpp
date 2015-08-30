@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "clang/AST/APValue.h"
+#include "clang/AST/APValueVisitor.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/CharUnits.h"
 #include "clang/AST/DeclCXX.h"
@@ -110,9 +111,10 @@ APValue::Arr::Arr(unsigned NumElts, unsigned Size) :
   NumElts(NumElts), ArrSize(Size) {}
 APValue::Arr::~Arr() { delete [] Elts; }
 
-APValue::StructData::StructData(unsigned NumBases, unsigned NumFields) :
+APValue::StructData::StructData(unsigned NumBases, unsigned NumFields,
+                                const RecordDecl *RD) :
   Elts(new APValue[NumBases+NumFields]),
-  NumBases(NumBases), NumFields(NumFields) {}
+  NumBases(NumBases), NumFields(NumFields), StructDecl(RD) {}
 APValue::StructData::~StructData() {
   delete [] Elts;
 }
@@ -164,7 +166,8 @@ APValue::APValue(const APValue &RHS) : Kind(Uninitialized) {
       getArrayFiller() = RHS.getArrayFiller();
     break;
   case Struct:
-    MakeStruct(RHS.getStructNumBases(), RHS.getStructNumFields());
+    MakeStruct(RHS.getStructNumBases(), RHS.getStructNumFields(),
+               RHS.getStructDecl());
     for (unsigned I = 0, N = RHS.getStructNumBases(); I != N; ++I)
       getStructBase(I) = RHS.getStructBase(I);
     for (unsigned I = 0, N = RHS.getStructNumFields(); I != N; ++I)
@@ -540,6 +543,179 @@ void APValue::printPretty(raw_ostream &Out, ASTContext &Ctx, QualType Ty) const{
     return;
   }
   llvm_unreachable("Unknown APValue kind!");
+}
+
+// This treats string literals and constant char arrays as the same. TODO: Add a
+// separate profile function that might be used by code-gen so as not to emit
+// multiple global variables of the exact same value.
+void APValue::ProfileAsNonTypeTemplateArgument(llvm::FoldingSetNodeID &ID,
+                                               const ASTContext &Ctx) const {
+  // We need to treat LValues that point to stringliterals as arrays.
+  if (getKind() != LValue)
+    ID.AddInteger(getKind());
+  switch(getKind()) {
+  case Uninitialized:
+    break;
+  case Int:
+    getInt().Profile(ID);
+    break;
+  case Float:
+    getFloat().Profile(ID);
+    break;
+  case Struct: {
+    const unsigned NumBases = getStructNumBases();
+    for (unsigned I = 0; I != NumBases; ++I)
+      getStructBase(I).ProfileAsNonTypeTemplateArgument(ID, Ctx);
+    const unsigned NumFields = getStructNumFields();
+    for (unsigned I = 0; I != NumFields; ++I)
+      getStructField(I).ProfileAsNonTypeTemplateArgument(ID, Ctx);
+    break;
+  }
+  case LValue: {
+    struct LValueTemplateArgProfiler : APValueVisitor<LValueTemplateArgProfiler> {
+      llvm::FoldingSetNodeID &ID;
+      const ASTContext &Ctx;
+      LValueTemplateArgProfiler(llvm::FoldingSetNodeID &ID,
+                                const ASTContext &Ctx)
+          : ID(ID), Ctx(Ctx) {}
+
+      bool VisitNullPtr(APValueParamTy V) {
+        // Add the kind
+        ID.AddInteger(APValue::LValue);
+        ID.AddPointer(nullptr);
+        return BaseTy::VisitNullPtr(V);
+      }
+      bool VisitLValueRootDecl(APValueParamTy V, const ValueDecl *VD) {
+        ID.AddInteger(APValue::LValue);
+        ID.AddPointer(VD->getCanonicalDecl());
+        return BaseTy::VisitLValueRootDecl(V, VD);
+      }
+      
+      bool VisitLValueDeclArraySubObj(APValueParamTy AP,
+                                      const ValueDecl *RootDecl,
+                                      const ValueDecl *CurArrayDecl,
+                                      QualType ElementTy, unsigned ArrayIndex,
+                                      unsigned PathIndex, unsigned NumPaths) {
+        ID.AddPointer(CurArrayDecl->getCanonicalDecl());
+        ID.AddInteger(ArrayIndex);
+        return BaseTy::VisitLValueDeclArraySubObj(AP, RootDecl, CurArrayDecl,
+                                                  ElementTy, ArrayIndex,
+                                                  PathIndex, NumPaths);
+      }
+
+      bool VisitLValueDeclBaseSubObj(APValueParamTy AP,
+                                     const ValueDecl *RootDecl,
+                                     const CXXRecordDecl *ParentClass,
+                                     const CXXRecordDecl *BaseClass,
+                                     unsigned PathIndex, unsigned NumPaths) {
+        ID.AddPointer(BaseClass);
+        return BaseTy::VisitLValueDeclBaseSubObj(
+            AP, RootDecl, ParentClass, BaseClass, PathIndex, NumPaths);
+      }
+
+      bool VisitLValueDeclFieldSubObj(APValueParamTy AP,
+                                      const ValueDecl *RootDecl,
+                                      const FieldDecl *FD, unsigned PathIndex,
+                                      unsigned NumPaths) {
+        ID.AddPointer(FD->getCanonicalDecl());
+        return BaseTy::VisitLValueDeclFieldSubObj(AP, RootDecl, FD, PathIndex,
+                                                  NumPaths);
+      }
+
+     
+      bool VisitLValueRootExpr(APValueParamTy AP, const Expr *RootExpr) {
+        assert(isa<StringLiteral>(RootExpr) && "The only expression that should be a "
+                                      "template argument LValue is a string "
+                                      "literal!");
+        // When profiling a string literal as part of a template argument - we
+        // hash it to the same value as an equivalent constant char array.
+        // That way:
+        // template<char b[4]> struct X;
+        // template<> struct X<"abc"> { };
+        // template<> struct X<{'a', 'b', 'c'}> { }; --> redefinition
+        // 
+        ID.AddInteger(Array);
+        const StringLiteral *SL = cast<StringLiteral>(RootExpr);
+
+        // get the type of the constant array that was initialized by this
+        // string literal.
+        //  const char cstr[256] = "abc";
+
+        // The type is char [256] - even though the length of the literal is 3
+        // (or is it 4?)
+        const ConstantArrayType *StrArrTy =
+            cast<ConstantArrayType>(SL->getType().getTypePtr());
+        const unsigned ArraySize = Ctx.getConstantArrayElementCount(StrArrTy);
+        ID.AddInteger(ArraySize);
+        assert(ArraySize >= SL->getLength() &&
+               "How is the array size not >= the string literal!");
+        QualType CharTy;
+        if (SL->isWide())
+          CharTy = Ctx.WideCharTy; // L'x' -> wchar_t in C and C++.
+        else if (SL->isUTF16())
+          CharTy = Ctx.Char16Ty; // u'x' -> char16_t in C11 and C++11.
+        else if (SL->isUTF32())
+          CharTy = Ctx.Char32Ty; // U'x' -> char32_t in C11 and C++11.
+        else
+          CharTy = Ctx.CharTy; // 'x' -> char in C++
+        unsigned NumInitialized = 0;
+        
+        for (int N = SL->getLength(); NumInitialized != N; ++NumInitialized) {
+          uint32_t CU = SL->getCodeUnit(NumInitialized);
+          APValue(Ctx.MakeIntValue(CU, CharTy))
+              .ProfileAsNonTypeTemplateArgument(ID, Ctx);
+        }
+        // Use null code unit fillers to fill in the remaining elements.
+        while (NumInitialized++ < ArraySize)
+          APValue(Ctx.MakeIntValue(0, CharTy)).ProfileAsNonTypeTemplateArgument(
+              ID, Ctx); // Add null code unit fillers.
+        
+        return BaseTy::VisitLValueRootExpr(AP, RootExpr);
+      }
+
+    } LValueTemplateArgProfiler(ID, Ctx);
+
+    LValueTemplateArgProfiler.Visit(*this);
+    break;
+  }
+  case Array: {
+    const unsigned ArraySize = getArraySize();
+    ID.AddInteger(ArraySize);
+    const unsigned NumInitializedElts = getArrayInitializedElts();
+    unsigned I;
+    for (I = 0; I != NumInitializedElts; ++I)
+      getArrayInitializedElt(I).ProfileAsNonTypeTemplateArgument(ID, Ctx);
+    // Add the fillers ... so that explicitly and implicitly initialized zeros
+    // hash to the same.
+    while (I++ != ArraySize) {
+      getArrayFiller().ProfileAsNonTypeTemplateArgument(ID, Ctx);
+    }
+    break;
+  }
+  case Union:
+    ID.AddInteger(getUnionField()->getFieldIndex());
+    getUnionValue().ProfileAsNonTypeTemplateArgument(ID, Ctx);
+    break;
+  case MemberPointer: {
+    const ValueDecl * VD = getMemberPointerDecl();
+    ID.AddPointer(VD->getCanonicalDecl());
+    const bool IsPointerToDerived = isMemberPointerToDerivedMember();
+    ID.AddBoolean(IsPointerToDerived);
+    ArrayRef<const CXXRecordDecl*> Path = getMemberPointerPath(); 
+    for (auto *RD : Path)
+      ID.AddPointer(RD->getCanonicalDecl());
+    break;
+  }
+  case ComplexInt:
+    llvm_unreachable("Profiling is still unimplemented for APValue::ComplexInt");
+  case ComplexFloat:
+    llvm_unreachable("Profiling is still unimplemented for APValue::ComplexFloat");
+  case Vector:
+    llvm_unreachable("Profiling is still unimplemented for APValue::Vector");
+  
+  case AddrLabelDiff:
+    llvm_unreachable("Profiling is still unimplemented for APValue::AddrLabelDiff");
+  }
 }
 
 std::string APValue::getAsString(ASTContext &Ctx, QualType Ty) const {

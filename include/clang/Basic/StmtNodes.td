@@ -107,6 +107,7 @@ def CXXFunctionalCastExpr : DStmt<ExplicitCastExpr>;
 def CXXTypeidExpr : DStmt<Expr>;
 def UserDefinedLiteral : DStmt<CallExpr>;
 def CXXBoolLiteralExpr : DStmt<Expr>;
+def CXXLiteralTypeConstantExpr : DStmt<Expr>;
 def CXXNullPtrLiteralExpr : DStmt<Expr>;
 def CXXThisExpr : DStmt<Expr>;
 def CXXThrowExpr : DStmt<Expr>;

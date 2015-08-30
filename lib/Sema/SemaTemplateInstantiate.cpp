@@ -1144,11 +1144,28 @@ ExprResult TemplateInstantiator::transformNonTypeTemplateParmRef(
     type = argExpr->getType();
 
   } else if (arg.getKind() == TemplateArgument::Declaration ||
-             arg.getKind() == TemplateArgument::NullPtr) {
+             arg.getKind() == TemplateArgument::NullPtr ||
+             (arg.getKind() == TemplateArgument::LiteralNonIntegralType &&
+              arg.getAsAPValue().isLValue() &&
+              arg.getAsAPValue().getLValueBase().is<const ValueDecl *>())) {
     ValueDecl *VD;
-    if (arg.getKind() == TemplateArgument::Declaration) {
-      VD = cast<ValueDecl>(arg.getAsDecl());
-
+    
+    if (arg.getKind() == TemplateArgument::Declaration ||
+        arg.getKind() == TemplateArgument::LiteralNonIntegralType) {
+      
+      if (arg.getKind() == TemplateArgument::Declaration)
+        VD = cast<ValueDecl>(arg.getAsDecl());
+      else {
+        // For LValue NTTPs - we transform the initialization expression - since
+        // we replace every mention of the NTTP with it.
+        VD = const_cast<ValueDecl *>(
+            arg.getAsAPValue().getLValueBase().get<const ValueDecl *>());
+        Expr *OldInitExpr = arg.getLiteralLValueInitExpr();
+        assert(OldInitExpr);
+        Expr *NewLValueInitExpr = TransformExpr(OldInitExpr).get();
+        assert(NewLValueInitExpr && "Must be able to transform the new init expr!");
+        return NewLValueInitExpr;
+      }
       // Find the instantiation of the template argument.  This is
       // required for nested templates.
       VD = cast_or_null<ValueDecl>(
@@ -1159,7 +1176,6 @@ ExprResult TemplateInstantiator::transformNonTypeTemplateParmRef(
       // Propagate NULL template argument.
       VD = nullptr;
     }
-    
     // Derive the type we want the substituted decl to have.  This had
     // better be non-dependent, or these checks will have serious problems.
     if (parm->isExpandedParameterPack()) {
@@ -1179,11 +1195,18 @@ ExprResult TemplateInstantiator::transformNonTypeTemplateParmRef(
 
     if (!result.isInvalid()) type = result.get()->getType();
   } else {
-    result = SemaRef.BuildExpressionFromIntegralTemplateArgument(arg, loc);
+    if (arg.getKind() == arg.LiteralNonIntegralType) {
+      const APValue &APVal = arg.getAsAPValue();
+      type = arg.getLiteralNonIntegralType().withConst();
+      result =
+          new (SemaRef.Context) CXXLiteralTypeConstantExpr(APVal, type, loc);
+    } else {
+      result = SemaRef.BuildExpressionFromIntegralTemplateArgument(arg, loc);
 
-    // Note that this type can be different from the type of 'result',
-    // e.g. if it's an enum type.
-    type = arg.getIntegralType();
+      // Note that this type can be different from the type of 'result', e.g. if
+      // it's an enum type.
+      type = arg.getIntegralType();
+    }
   }
   if (result.isInvalid()) return ExprError();
 

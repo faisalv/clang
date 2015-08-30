@@ -15,6 +15,7 @@
 #ifndef LLVM_CLANG_AST_EXPRCXX_H
 #define LLVM_CLANG_AST_EXPRCXX_H
 
+#include "clang/AST/APValue.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/Expr.h"
 #include "clang/AST/LambdaCapture.h"
@@ -490,6 +491,41 @@ public:
     return child_range(child_iterator(), child_iterator());
   }
 };
+
+/// \brief A class-literal-expr, per ([C++ basic.types] 10, 10.5).
+///
+class CXXLiteralTypeConstantExpr : public Expr {
+  APValue Value;
+  SourceLocation Loc;
+public:
+  CXXLiteralTypeConstantExpr(APValue val, QualType Ty, SourceLocation l)
+      : Expr(CXXLiteralTypeConstantExprClass, Ty.withConst(), VK_RValue,
+             OK_Ordinary, false, false, false, false),
+        Value(val), Loc(l) {}
+
+  explicit CXXLiteralTypeConstantExpr(EmptyShell Empty)
+    : Expr(CXXLiteralTypeConstantExprClass, Empty) { }
+
+  const APValue &getValue() const { return Value; }
+  void setValue(const APValue &V) { Value = V; }
+
+  SourceLocation getLocStart() const LLVM_READONLY { return Loc; }
+  SourceLocation getLocEnd() const LLVM_READONLY { return Loc; }
+
+  SourceLocation getLocation() const { return Loc; }
+  void setLocation(SourceLocation L) { Loc = L; }
+
+  static bool classof(const Stmt *T) {
+    return T->getStmtClass() == CXXLiteralTypeConstantExprClass;
+  }
+
+  // Iterators
+  child_range children() {
+    return child_range(child_iterator(), child_iterator());
+  }
+};
+
+
 
 /// \brief Implicit construction of a std::initializer_list<T> object from an
 /// array temporary within list-initialization (C++11 [dcl.init.list]p5).

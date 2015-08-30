@@ -385,8 +385,11 @@ static bool IsStructurallyEquivalent(StructuralEquivalenceContext &Context,
         return false;
       
     return true;
-  }
   
+  case TemplateArgument::LiteralNonIntegralType: {
+    assert(false && "Handle literal or struct union types");
+  }
+  }
   llvm_unreachable("Invalid template argument kind");
 }
 
@@ -2213,6 +2216,9 @@ ASTNodeImporter::ImportTemplateArgument(const TemplateArgument &From) {
 
     return TemplateArgument(
         llvm::makeArrayRef(ToPack).copy(Importer.getToContext()));
+  }
+  case TemplateArgument::LiteralNonIntegralType: {
+    assert(false && "Handle literal or struct union types");
   }
   }
   

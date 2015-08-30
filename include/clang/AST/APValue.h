@@ -30,6 +30,7 @@ namespace clang {
   class Decl;
   class ValueDecl;
   class CXXRecordDecl;
+  class RecordDecl;
   class QualType;
 
 /// APValue - This class implements a discriminated union of [uninitialized]
@@ -93,7 +94,8 @@ private:
     APValue *Elts;
     unsigned NumBases;
     unsigned NumFields;
-    StructData(unsigned NumBases, unsigned NumFields);
+    const RecordDecl *StructDecl;
+    StructData(unsigned NumBases, unsigned NumFields, const RecordDecl *D);
     ~StructData();
   };
   struct UnionData {
@@ -147,8 +149,8 @@ public:
   APValue(UninitArray, unsigned InitElts, unsigned Size) : Kind(Uninitialized) {
     MakeArray(InitElts, Size);
   }
-  APValue(UninitStruct, unsigned B, unsigned M) : Kind(Uninitialized) {
-    MakeStruct(B, M);
+  APValue(UninitStruct, unsigned B, unsigned M, const RecordDecl *RD) : Kind(Uninitialized) {
+    MakeStruct(B, M, RD);
   }
   explicit APValue(const FieldDecl *D, const APValue &V = APValue())
       : Kind(Uninitialized) {
@@ -312,6 +314,10 @@ public:
     assert(isStruct() && "Invalid accessor");
     return ((StructData*)(char*)Data.buffer)->Elts[getStructNumBases() + i];
   }
+  const RecordDecl *getStructDecl() const {
+    assert(isStruct() && "Invalid accessor");
+    return ((StructData*)(char*)Data.buffer)->StructDecl;
+  }
   const APValue &getStructBase(unsigned i) const {
     return const_cast<APValue*>(this)->getStructBase(i);
   }
@@ -323,6 +329,7 @@ public:
     assert(isUnion() && "Invalid accessor");
     return ((const UnionData*)(const char*)Data.buffer)->Field;
   }
+
   APValue &getUnionValue() {
     assert(isUnion() && "Invalid accessor");
     return *((UnionData*)(char*)Data.buffer)->Value;
@@ -394,6 +401,17 @@ public:
     swap(RHS);
     return *this;
   }
+  /// \brief Determine if two APValues have the same value. 
+  // TODO: Implement this function
+  // static bool isSameValue(const APValue &I1, const APValue &I2);
+
+  /// ProfileAsTemplateArgument - Used to hash APValues that represent
+  /// generalized literal type non-type template arguments, so that they
+  /// (or template-arguments nodes) may be inserted into folding sets.
+  /// This hashes in a way that equates string literals and character arrays,
+  /// which is specific for NonTypeTemplate Arguments.
+  void ProfileAsNonTypeTemplateArgument(llvm::FoldingSetNodeID &ID,
+                                        const ASTContext &Ctx) const;
 
 private:
   void DestroyDataAndMakeUninit();
@@ -428,9 +446,9 @@ private:
   }
   void MakeLValue();
   void MakeArray(unsigned InitElts, unsigned Size);
-  void MakeStruct(unsigned B, unsigned M) {
+  void MakeStruct(unsigned B, unsigned M, const RecordDecl *RD) {
     assert(isUninit() && "Bad state change");
-    new ((void*)(char*)Data.buffer) StructData(B, M);
+    new ((void*)(char*)Data.buffer) StructData(B, M, RD);
     Kind = Struct;
   }
   void MakeUnion() {

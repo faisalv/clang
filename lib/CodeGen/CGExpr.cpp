@@ -927,6 +927,9 @@ LValue CodeGenFunction::EmitLValue(const Expr *E) {
     return EmitOpaqueValueLValue(cast<OpaqueValueExpr>(E));
   case Expr::SubstNonTypeTemplateParmExprClass:
     return EmitLValue(cast<SubstNonTypeTemplateParmExpr>(E)->getReplacement());
+  case Expr::CXXLiteralTypeConstantExprClass:
+    return EmitCXXLiteralTypeConstantLValue(
+        cast<CXXLiteralTypeConstantExpr>(E));
   case Expr::ImplicitCastExprClass:
   case Expr::CStyleCastExprClass:
   case Expr::CXXFunctionalCastExprClass:
@@ -1910,6 +1913,31 @@ static LValue EmitGlobalNamedRegister(const VarDecl *VD,
       llvm::MetadataAsValue::get(CGM.getLLVMContext(), M->getOperand(0)),
       VD->getType(), Alignment);
 }
+
+
+LValue CodeGenFunction::EmitCXXLiteralTypeConstantLValue(const CXXLiteralTypeConstantExpr *E){
+#if 1
+ llvm::Constant *C = CGM.EmitConstantValue(E->getValue(), E->getType(), this);
+ assert(C);
+ llvm::GlobalVariable *GlobalPtr = new llvm::GlobalVariable(
+        CGM.getModule(), C->getType(), true,
+        llvm::GlobalValue::InternalLinkage, C, ".ltce-lval");
+ return MakeAddrLValue(GlobalPtr, E->getType());
+#endif
+#ifdef USE_LOCAL_VAR
+// if (E->getType()->isVariablyModifiedType())
+    // make sure to emit the VLA size.
+//    EmitVariablyModifiedType(E->getType());
+
+  llvm::Value *DeclPtr = CreateMemTemp(E->getType(), ".local-ltce-lval");
+  LValue Result = MakeAddrLValue(DeclPtr, E->getType());
+  EmitAnyExprToMem(E, DeclPtr, E->getType().getQualifiers(),
+                   /*Init*/ false);
+  return Result;
+#endif
+}
+
+
 
 LValue CodeGenFunction::EmitDeclRefLValue(const DeclRefExpr *E) {
   const NamedDecl *ND = E->getDecl();

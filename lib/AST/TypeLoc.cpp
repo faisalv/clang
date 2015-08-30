@@ -438,6 +438,7 @@ void TemplateSpecializationTypeLoc::initializeArgLocs(ASTContext &Context,
       llvm_unreachable("Impossible TemplateArgument");
 
     case TemplateArgument::Integral:
+    case TemplateArgument::LiteralNonIntegralType:
     case TemplateArgument::Declaration:
     case TemplateArgument::NullPtr:
       ArgInfos[i] = TemplateArgumentLocInfo();
