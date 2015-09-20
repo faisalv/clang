@@ -4776,9 +4776,9 @@ struct UFCAccountant {
         ErrorTrap(S.getDiagnostics()) {}
   ~UFCAccountant() {
 
-   assert(!IsAttemptingTranspose || !S.getDiagnostics().hasErrorOccurred() &&
-           "We should not trigger a recordable error when attempting a "
-           "transpose!");
+   //assert(!IsAttemptingTranspose || !ErrorTrap.hasErrorOccurred() &&
+   //        "We should not trigger a recordable error when attempting a "
+   //        "transpose!");
 
     if (IsDependentCtx) return;
     if (IsAttemptingTranspose) return;
