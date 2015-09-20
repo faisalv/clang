@@ -4769,10 +4769,17 @@ struct UFCAccountant {
   ExprResult &Ret;
   const bool IsDependentCtx;
   const bool IsAttemptingTranspose;
+  DiagnosticErrorTrap ErrorTrap;
   UFCAccountant(Sema &S, ExprResult &Ret, bool IsAttemptingTranspose)
       : S(S), Ret(Ret), IsDependentCtx(S.CurContext->isDependentContext()),
-        IsAttemptingTranspose(IsAttemptingTranspose) {}
+        IsAttemptingTranspose(IsAttemptingTranspose), 
+        ErrorTrap(S.getDiagnostics()) {}
   ~UFCAccountant() {
+
+   assert(!IsAttemptingTranspose || !S.getDiagnostics().hasErrorOccurred() &&
+           "We should not trigger a recordable error when attempting a "
+           "transpose!");
+
     if (IsDependentCtx) return;
     if (IsAttemptingTranspose) return;
     if (S.IsBuildingRecoveryCallExpr) return;
@@ -4976,6 +4983,8 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
           
         if (TransposedInvokable.isUsable())
           return Result = TransposedInvokable;
+
+        TrapDiagnostics.disable();
       }
       ExprResult TryInvokable =
           BuildCallToObjectOfClassType(S, Fn, LParenLoc, ArgExprs, RParenLoc);
@@ -5049,7 +5058,7 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
                                                        ArgExprs, RParenLoc);
           if (ER.isUsable())
             return Result = ER;
-         
+          TrapDiagnostics.disable();
         }
 
         ExprResult OvlResolvedCallExpr = BuildOverloadedCallExpr(
@@ -5158,6 +5167,7 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
           TryBuildCallAsMemberFunction(S, Fn, LParenLoc, ArgExprs, RParenLoc);
       if (ER.isUsable())
         return Result = ER;
+      TrapDiagnostics.disable();
     }
     
     ExprResult TryInvokable = BuildResolvedCallExpr(
