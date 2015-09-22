@@ -4767,11 +4767,11 @@ std::vector<CallExpr *> UFC_VecOfCallExprs;
 struct UFCAccountant {
   Sema &S;
   ExprResult &Ret;
-  const bool IsDependentCtx;
+  bool IsDependent;
   const bool IsAttemptingTranspose;
   DiagnosticErrorTrap ErrorTrap;
   UFCAccountant(Sema &S, ExprResult &Ret, bool IsAttemptingTranspose)
-      : S(S), Ret(Ret), IsDependentCtx(S.CurContext->isDependentContext()),
+      : S(S), Ret(Ret), IsDependent(false),
         IsAttemptingTranspose(IsAttemptingTranspose), 
         ErrorTrap(S.getDiagnostics()) {}
   ~UFCAccountant() {
@@ -4780,7 +4780,7 @@ struct UFCAccountant {
    //        "We should not trigger a recordable error when attempting a "
    //        "transpose!");
 
-    if (IsDependentCtx) return;
+    if (IsDependent) return;
     if (IsAttemptingTranspose) return;
     if (S.IsBuildingRecoveryCallExpr) return;
     if (!S.getLangOpts().isUFCStatsOn() &&
@@ -4877,7 +4877,7 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
       Dependent = true;
     else if (Expr::hasAnyTypeDependentArguments(ArgExprs))
       Dependent = true;
-
+    UFCAccountant.IsDependent = Dependent;
     if (Dependent) {
       if (ExecConfig) {
         return Result = new (Context) CUDAKernelCallExpr(
