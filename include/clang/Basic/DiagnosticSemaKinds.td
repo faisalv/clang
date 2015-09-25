@@ -2649,7 +2649,7 @@ def warn_impcast_objective_c_literal_to_bool : Warning<
 
 // Diagnostics as part of unified function call
 def warn_ufc_function_call_transposed : Warning<
-    "function call transposed (ufc)">,
+    "function call transposed (ufc) %select{|[SFINAE]|[NonInstantiationSFINAE]}0">,
     InGroup<DiagGroup<"ufc-call-transposed">>, ShowInSystemHeader, NoSFINAE;
 def note_ufc_callee_decl : Note<"call resolved to %0 declared here">, ShowInSystemHeader, NoSFINAE;
 

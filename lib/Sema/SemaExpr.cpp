@@ -4769,18 +4769,23 @@ struct UFCAccountant {
   ExprResult &Ret;
   bool IsDependent;
   const bool IsAttemptingTranspose;
-  DiagnosticErrorTrap ErrorTrap;
-  UFCAccountant(Sema &S, ExprResult &Ret, bool IsAttemptingTranspose)
+  const Expr *const Fn;
+  UFCAccountant(Sema &S, ExprResult &Ret, bool IsAttemptingTranspose, Expr *Fn)
       : S(S), Ret(Ret), IsDependent(false),
         IsAttemptingTranspose(IsAttemptingTranspose), 
-        ErrorTrap(S.getDiagnostics()) {}
+        Fn(Fn) {}
   ~UFCAccountant() {
 
    //assert(!IsAttemptingTranspose || !ErrorTrap.hasErrorOccurred() &&
    //        "We should not trigger a recordable error when attempting a "
    //        "transpose!");
 
-    if (IsDependent) return;
+    // Allow accounting for non-dependent calls in a dependent context - i.e.
+    // when performing SFINAE - we might be in a dependent context - but a call
+    // might be transposed - and be non-dependent, and change the outcome of 
+    // a function call.
+    if (IsDependent)
+      return;
     if (IsAttemptingTranspose) return;
     if (S.IsBuildingRecoveryCallExpr) return;
     if (!S.getLangOpts().isUFCStatsOn() &&
@@ -4806,8 +4811,11 @@ struct UFCAccountant {
       if (RetCE->isTransposedCall()) {
         ++UFC_NumOfTransposedCalls;
         if (S.getLangOpts().isUFCWarnAboutTranspose()) {
-          S.Diag(RetCE->getLocStart(), diag::warn_ufc_function_call_transposed)
-              << RetCE->getSourceRange();
+          int SFINAEKind = S.isSFINAEContext() ? 1 : 0;
+          if (S.InNonInstantiationSFINAEContext)
+            SFINAEKind = 2;
+          S.Diag(Fn->getLocStart(), diag::warn_ufc_function_call_transposed)
+              << SFINAEKind << RetCE->getSourceRange();
           const NamedDecl *NamedCalleeDecl =
               cast<NamedDecl>(RetCE->getCalleeDecl());
           S.Diag(NamedCalleeDecl->getLocation(), diag::note_ufc_callee_decl)
@@ -4830,7 +4838,7 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
   ExprResult Result = MaybeConvertParenListExprToParenExpr(S, Fn);
 
   struct UFCAccountant UFCAccountant(*this, Result,
-                                     IsTransposingForUnifiedFunctionCall);
+                                     IsTransposingForUnifiedFunctionCall, Fn);
 
   if (Result.isInvalid())
     return Result = ExprError();

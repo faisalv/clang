@@ -11588,6 +11588,39 @@ static bool inline hasArrowOperator(Expr *Base, SourceLocation OpLoc, Sema &S) {
   return false;
 }
 
+// A Scope Guard Object that adjusts for any pending instantiations which were
+// queued and should not have been - for e.g. if we favor trying the member call
+// syntax first - all such pending instantiation should be reverted if we did
+// not succeed with the member syntax.
+struct PendingInstantiationAdjusterRAII {
+  std::deque<Sema::PendingImplicitInstantiation> PendingInstantiations;
+  std::deque<Sema::PendingImplicitInstantiation> PendingLocalInstantiations;
+  Sema &S;
+  bool CallSucceeded;
+  PendingInstantiationAdjusterRAII(Sema &S) : S(S), CallSucceeded(false) {
+    PendingInstantiations.swap(S.PendingInstantiations);
+    PendingLocalInstantiations.swap(S.PendingLocalImplicitInstantiations);
+    
+  }
+  ~PendingInstantiationAdjusterRAII() {
+    // If the call succeeded - queue the pending instantiations intot he saved
+    // queues - prior to restoring them.
+    if (CallSucceeded) {
+      PendingInstantiations.insert(PendingInstantiations.begin(),
+                                   S.PendingInstantiations.begin(),
+                                   S.PendingInstantiations.end());
+      PendingLocalInstantiations.insert(
+          PendingLocalInstantiations.begin(),
+          S.PendingLocalImplicitInstantiations.begin(),
+          S.PendingLocalImplicitInstantiations.end());
+    }
+
+    PendingInstantiations.swap(S.PendingInstantiations);
+    PendingLocalInstantiations.swap(S.PendingLocalImplicitInstantiations);
+  }
+  
+};
+
 
 ExprResult Sema::TryBuildCallAsMemberFunction(Scope *S, Expr *Fn,
                                          SourceLocation LParenLoc,
@@ -11599,7 +11632,8 @@ ExprResult Sema::TryBuildCallAsMemberFunction(Scope *S, Expr *Fn,
   ASTBasedADLandUFCDeterminatorRAII AdlUfcRAII(*this, Fn);
 
   if (!ConsiderUFC.getValue()) return ExprError();
-  
+  PendingInstantiationAdjusterRAII PendingInstantiationAdjuster(*this);
+
   Expr *NakedFn = Fn->IgnoreParens();
   DeclarationNameInfo FunNameInfo;
   SourceLocation TemplateKWLoc;
@@ -11688,8 +11722,10 @@ ExprResult Sema::TryBuildCallAsMemberFunction(Scope *S, Expr *Fn,
     if (ResolvedMemberCallExpr.isUsable())
       cast<CallExpr>(ResolvedMemberCallExpr.get())->setIsTransposedCall();
 
-    if (!TrapDiagnostics.hasErrorOccurred())
+    if (!TrapDiagnostics.hasErrorOccurred()) {
+      PendingInstantiationAdjuster.CallSucceeded = true;
       return ResolvedMemberCallExpr;
+    }
   }
   return ExprError();
 }
@@ -11704,7 +11740,7 @@ ExprResult Sema::TryBuildCallAsNonMemberFunction(Scope *S, Expr *MemExprE,
 
   if (!ConsiderUFC.getValue()) 
     return ExprError();
-  
+  PendingInstantiationAdjusterRAII PendingInstantiationAdjuster(*this);
   // Dig out the member expression. This holds both the object
   // argument and the member function we're referring to.
   Expr *NakedMemExpr = MemExprE->IgnoreParens();
@@ -11745,8 +11781,11 @@ ExprResult Sema::TryBuildCallAsNonMemberFunction(Scope *S, Expr *MemExprE,
     // function, but while we found a member function with the same name - the
     // call to it is not well-formed, so now try y.f(3) - do not try a
     // non-member call.
-    return TryBuildCallAsMemberFunction(S, MemExprE, LParenLoc, Args,
+    ExprResult Ret = TryBuildCallAsMemberFunction(S, MemExprE, LParenLoc, Args,
                                         RParenLoc);
+    if (Ret.isUsable())
+      PendingInstantiationAdjuster.CallSucceeded = true;
+    return Ret;
   } else {
     // Try non-member call syntax.
     CXXScopeSpec SS; 
@@ -11829,11 +11868,12 @@ ExprResult Sema::TryBuildCallAsNonMemberFunction(Scope *S, Expr *MemExprE,
     ArgsWithObjAdded.append(Args.begin(), Args.end());
     ExprResult ResolvedCallExpr =
         ActOnCallExpr(S, UnresNonMemberExpr.get(), LParenLoc, ArgsWithObjAdded,
-                      RParenLoc, nullptr, false,
+                      RParenLoc, nullptr, /*IsExecConfig*/ false,
                       /*IsTransposingForUnifiedFunctionCall*/ true);
 
     if (ResolvedCallExpr.isUsable() && !TrapDiagnostics.hasErrorOccurred()) {
       cast<CallExpr>(ResolvedCallExpr.get())->setIsTransposedCall();
+      PendingInstantiationAdjuster.CallSucceeded = true;
       return ResolvedCallExpr;
     }
   }
