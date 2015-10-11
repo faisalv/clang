@@ -291,3 +291,23 @@ static_assert((*b)[0].bc == 'a', "");
 } // end test_arrays
 } // test_constexpr_ns
 
+namespace test_non_standard_layout_unions {
+
+  struct A {
+    int x;
+  };
+  struct B {
+    int y;
+  private:
+    double z;
+  };
+  union U {
+    A ua;
+    B ub;
+  };
+
+constexpr U u{{1}};
+constexpr int i = u.ub.y; //expected-error{{must be initialized by a constant expression}} expected-note{{active member}}
+
+
+}
