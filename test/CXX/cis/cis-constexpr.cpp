@@ -6,7 +6,7 @@
 
 namespace test_constexpr_ns {
 
-namespace test_nested_unions {
+namespace test_nested_unions_not_cis {
   union A { int ai; char ac = 'a'; };
   union B { int bi; char bc; };
   union U {
@@ -15,7 +15,7 @@ namespace test_nested_unions {
   };
   
   constexpr U u{};
-  static_assert(u.ub.bc == 'a', "");
+  static_assert(u.ub.bc == 'a', ""); //expected-error{{not an integral constant expression}} expected-note{{active member}}
   constexpr A a = u.ua;
   constexpr B b = u.ub; //expected-error{{must be initialized by a constant expression}} expected-note{{active member}} expected-note{{in call}}
   namespace test_union_order_matters {
@@ -309,5 +309,14 @@ namespace test_non_standard_layout_unions {
 constexpr U u{{1}};
 constexpr int i = u.ub.y; //expected-error{{must be initialized by a constant expression}} expected-note{{active member}}
 
+} //end ns test_non_standard_layout_unions
 
+namespace test_no_cis {
+ constexpr union U {
+   int x = 1, y;
+ } u{};
+ 
+ constexpr int I = u.y; ////expected-error{{must be initialized by a constant expression}} expected-note{{active member}}
+ 
+ 
 }

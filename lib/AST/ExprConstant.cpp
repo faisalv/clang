@@ -2350,10 +2350,18 @@ inline static bool isValidCommonInitialSequenceAccess(
     if (!areLayoutCompatible(Info, *sfit, *afit))
       return false;
   }
+  
 
   // Either both are structs or unions and we will be diving into them ... Or
   // they are the end of the line, and should be layout compatible.
   if ((BothAreRecordTypes || BothAreArrayTypes) && !IsLastSubobjectPath) {
+    if (BothAreRecordTypes) {
+      // We can not have a union directly nested as field in a parent union
+      // since CIS are only defined for structs.
+      if (AccessedField->getType()->getAs<RecordType>()->isUnionType() &&
+          AccessedRD->isUnion())
+        return false;
+    }
     return true;
   }
   // If we are at the end of the line, then the indices of the field should be
