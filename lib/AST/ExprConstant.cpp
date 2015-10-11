@@ -2090,7 +2090,7 @@ static void expandStringLiteral(EvalInfo &Info, const Expr *Lit,
 
   unsigned Elts = CAT->getSize().getZExtValue();
   Result = APValue(APValue::UninitArray(),
-                   std::min(S->getLength(), Elts), Elts);
+                   std::min(S->getLength(), Elts), Elts, CAT);
   APSInt Value(S->getCharByteWidth() * Info.Ctx.getCharWidth(),
                CharType->isUnsignedIntegerType());
   if (Result.hasArrayFiller())
@@ -2112,7 +2112,8 @@ static void expandArray(APValue &Array, unsigned Index) {
   NewElts = std::min(Size, std::max(NewElts, 8u));
 
   // Copy the data across.
-  APValue NewValue(APValue::UninitArray(), NewElts, Size);
+  APValue NewValue(APValue::UninitArray(), NewElts, Size,
+                   Array.getArrayType());
   for (unsigned I = 0; I != OldElts; ++I)
     NewValue.getArrayInitializedElt(I).swap(Array.getArrayInitializedElt(I));
   for (unsigned I = OldElts; I != NewElts; ++I)
@@ -2205,6 +2206,162 @@ struct CompleteObject {
   explicit operator bool() const { return Value; }
 };
 
+static bool isStandardLayout(const RecordDecl *RD) {
+  if (!RD) return false;
+  if (const auto *CXXRD = dyn_cast<CXXRecordDecl>(RD))
+    return CXXRD->isStandardLayout();
+  return true; // C structs are always standard layout.
+}
+
+static bool areLayoutCompatible(EvalInfo &Info, const Type *T1,
+                                const Type *T2);
+
+
+static bool areBasesLayoutCompatible(EvalInfo &Info, const RecordType *T1,
+                                     const RecordType *T2) {
+  if (Info.Ctx.getLangOpts().CPlusPlus) {
+    if (!T1 && !T2) return true; // If both are null, then we are compatible.
+    if (!T1 || !T2) return false; // If only one is null, then we are not.
+    const CXXRecordDecl *RD1 = T1->getAsCXXRecordDecl();
+    const CXXRecordDecl *RD2 = T2->getAsCXXRecordDecl();
+    if (RD1->getCanonicalDecl() == RD2->getCanonicalDecl()) return true;
+
+    if (RD1->getNumBases() != RD2->getNumBases())
+      return false;
+    for (auto b1it = RD1->bases_begin(), b1end = RD1->bases_end(),
+              b2it = RD2->bases_begin();
+         b1it != b1end; ++b1it, ++b2it) {
+      if (!areLayoutCompatible(Info, b1it->getType().getTypePtr(),
+                               b2it->getType().getTypePtr()))
+        return false;
+    }
+  }
+  return true;
+}
+
+static bool areLayoutCompatible(EvalInfo &Info, const FieldDecl *F1,
+                                const FieldDecl *F2) {
+  // If either one is a bitfield ...
+  if (F1->isBitField() || F2->isBitField()) {
+    // both must be bitfields...
+    if (!F1->isBitField() && !F2->isBitField())
+      return false;
+    // ... and of the same width
+    if (F1->getBitWidthValue(Info.Ctx) != F2->getBitWidthValue(Info.Ctx))
+      return false;
+  }
+  return areLayoutCompatible(Info, F1->getType().getTypePtr(),
+                             F2->getType().getTypePtr());
+}
+
+
+static bool areLayoutCompatible(EvalInfo &Info, const Type *T1,
+                                const Type *T2) {
+  if (Info.Ctx.hasSameType(T1, T2))
+    return true;
+  
+  const Type *F1Type = T1;
+  const Type *F2Type = T2;
+  if (F1Type->isEnumeralType() && F2Type->isEnumeralType()) {
+    const auto *ED1 = cast<EnumDecl>(F1Type->getAsTagDecl());
+    const auto *ED2 = cast<EnumDecl>(F2Type->getAsTagDecl());
+    return Info.Ctx.hasSameType(ED1->getIntegerType(), ED2->getIntegerType());
+  }
+  const RecordDecl *F1RD = dyn_cast_or_null<RecordDecl>(F1Type->getAsTagDecl());
+  const RecordDecl *F2RD = dyn_cast_or_null<RecordDecl>(F2Type->getAsTagDecl());
+  if (isStandardLayout(F1RD) && isStandardLayout(F2RD)) {
+    
+    // If either both are unions or neither are...
+    if (F1RD->isUnion() ? F2RD->isUnion() : !F2RD->isUnion()) {
+      if (!areBasesLayoutCompatible(
+              Info, F1RD->getTypeForDecl()->getAsStructureType(),
+              F2RD->getTypeForDecl()->getAsStructureType()))
+        return false;
+
+      const size_t F1NumFields =
+          std::distance(F1RD->field_begin(), F1RD->field_end());
+      const size_t F2NumFields =
+          std::distance(F2RD->field_begin(), F2RD->field_end());
+      if (F1NumFields != F2NumFields)
+        return false;
+
+      for (auto f1it = F1RD->field_begin(), f2it = F2RD->field_begin(),
+                f1end = F1RD->field_end();
+           f1it != f1end; ++f1it, ++f2it) {
+        if (!areLayoutCompatible(Info, *f1it, *f2it))
+          return false;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+inline static bool isValidCommonInitialSequenceAccess(
+    const RecordDecl *StoredRD, const RecordDecl *AccessedRD,
+    const FieldDecl *StoredField, const FieldDecl *AccessedField,
+    const bool IsLastSubobjectPath, EvalInfo &Info) {
+  // Check to see if the field the union was initialized with and the current
+  // field are part of a common-initial-sequence - and if so, allow access.
+
+  if (!isStandardLayout(StoredRD) || !isStandardLayout(AccessedRD) ||
+      !areBasesLayoutCompatible(Info,
+                                cast<RecordType>(StoredRD->getTypeForDecl()),
+                                cast<RecordType>(AccessedRD->getTypeForDecl())))
+    return false;
+
+  // Both fields should be standard layout.
+  if (!StoredField->getType()->isStandardLayoutType() ||
+      !AccessedField->getType()->isStandardLayoutType())
+    return false;
+
+  // We should have the same index for union members as long it is not the first
+  // access path (which is where they diverge).
+
+  const bool BothAreRecordTypes = StoredField->getType()->getAs<RecordType>() &&
+                                  AccessedField->getType()->getAs<RecordType>();
+
+  const bool NeitherAreRecordTypes =
+      !StoredField->getType()->getAs<RecordType>() &&
+      !AccessedField->getType()->getAs<RecordType>();
+
+  if (!(BothAreRecordTypes || NeitherAreRecordTypes))
+    return false;
+  
+  const bool BothAreArrayTypes =
+      StoredField->getType()->isConstantArrayType() &&
+      AccessedField->getType()->isConstantArrayType();
+  const bool NeitherAreArrayTypes =
+      !StoredField->getType()->isConstantArrayType() &&
+      !AccessedField->getType()->isConstantArrayType();
+
+  if (!(BothAreArrayTypes || NeitherAreArrayTypes))
+    return false;
+  // Make sure all the corresponding data members declared prior to this field
+  // are layout compatible with each other.
+  
+  unsigned int NumFieldsInAccessedStruct =
+      std::distance(AccessedRD->field_begin(), AccessedRD->field_end());
+  if (StoredField->getFieldIndex() >= NumFieldsInAccessedStruct)
+    return false;
+
+  for (auto sfit = StoredRD->field_begin(), afit = AccessedRD->field_begin();
+       *sfit != StoredField; ++sfit, ++afit) {
+    if (!areLayoutCompatible(Info, *sfit, *afit))
+      return false;
+  }
+
+  // Either both are structs or unions and we will be diving into them ... Or
+  // they are the end of the line, and should be layout compatible.
+  if ((BothAreRecordTypes || BothAreArrayTypes) && !IsLastSubobjectPath) {
+    return true;
+  }
+  // If we are at the end of the line, then the indices of the field should be
+  // the same - else we have not entered into the first subobject.
+  return AccessedField->getFieldIndex() == StoredField->getFieldIndex() &&
+           areLayoutCompatible(Info, StoredField, AccessedField);
+}
+
 /// Find the designated sub-object of an rvalue.
 template<typename SubobjectHandler>
 typename SubobjectHandler::result_type
@@ -2225,7 +2382,20 @@ findSubobject(EvalInfo &Info, const Expr *E, const CompleteObject &Obj,
   APValue *O = Obj.Value;
   QualType ObjType = Obj.Type;
   const FieldDecl *LastField = nullptr;
+  // Track the active union field when failing to access comon initial sequence
+  const FieldDecl *CISLastUnionFieldStored = nullptr; 
+  
+  const FieldDecl *CISLastFieldAccessed = nullptr;
+  const FieldDecl *CISLastFieldStored = nullptr;
 
+  bool IsAccessingCommonInitialSequence = false;
+  auto AccessedInvalidUnionMember =
+      [&CISLastUnionFieldStored, &handler, &Info, &CISLastFieldAccessed, &E] {
+    Info.Diag(E, diag::note_constexpr_access_inactive_union_member)
+        << handler.AccessKind << CISLastFieldAccessed << !CISLastUnionFieldStored
+        << CISLastUnionFieldStored;
+    return handler.failed();
+  };
   // Walk the designator's path to find the subobject.
   for (unsigned I = 0, N = Sub.Entries.size(); /**/; ++I) {
     if (O->isUninit()) {
@@ -2233,7 +2403,7 @@ findSubobject(EvalInfo &Info, const Expr *E, const CompleteObject &Obj,
         Info.Diag(E, diag::note_constexpr_access_uninit) << handler.AccessKind;
       return handler.failed();
     }
-
+    
     if (I == N) {
       // If we are reading an object of class type, there may still be more
       // things we need to check: if there are any mutable subobjects, we
@@ -2254,7 +2424,7 @@ findSubobject(EvalInfo &Info, const Expr *E, const CompleteObject &Obj,
 
       return true;
     }
-
+    const bool IsLastSubobjectPath = (I == N - 1);
     LastField = nullptr;
     if (ObjType->isArrayType()) {
       // Next subobject is an array element.
@@ -2271,9 +2441,28 @@ findSubobject(EvalInfo &Info, const Expr *E, const CompleteObject &Obj,
           Info.Diag(E);
         return handler.failed();
       }
-
       ObjType = CAT->getElementType();
-
+      
+      if (IsAccessingCommonInitialSequence) {
+        const QualType StoredElementType = O->getArrayType()->getElementType();
+        const QualType AccessedElementType = ObjType;
+        // If this is the first element and we will be diving into it ...
+        // OR if we are indexing any other element and each element is layout
+        // compatible with what was stored AND (either we will be diving into
+        // the element OR they have the same field index  which means they 
+        // are part of a common-initial-sequence [and different parent structs])
+        // which means the access is OK.
+        const bool ArrayElementAccessIsOK = (Index == 0 && !IsLastSubobjectPath) ||
+            (Index < O->getArraySize() &&
+             areLayoutCompatible(Info, AccessedElementType.getTypePtr(),
+                                 StoredElementType.getTypePtr()) &&
+             (!IsLastSubobjectPath ||
+              CISLastFieldAccessed->getParent()->getCanonicalDecl() !=
+                  CISLastFieldStored->getParent()->getCanonicalDecl())); 
+        
+        if (!ArrayElementAccessIsOK)
+          return AccessedInvalidUnionMember();
+      }
       // An array object is represented as either an Array APValue or as an
       // LValue which refers to a string literal.
       if (O->isLValue()) {
@@ -2320,27 +2509,74 @@ findSubobject(EvalInfo &Info, const Expr *E, const CompleteObject &Obj,
                                    : O->getComplexFloatReal(), ObjType);
       }
     } else if (const FieldDecl *Field = getAsField(Sub.Entries[I])) {
+      
+      CISLastFieldAccessed = Field;
       if (Field->isMutable() && handler.AccessKind == AK_Read) {
         Info.Diag(E, diag::note_constexpr_ltor_mutable, 1)
           << Field;
         Info.Note(Field->getLocation(), diag::note_declared_at);
         return handler.failed();
       }
-
+      
       // Next subobject is a class, struct or union field.
       RecordDecl *RD = ObjType->castAs<RecordType>()->getDecl();
       if (RD->isUnion()) {
         const FieldDecl *UnionField = O->getUnionField();
+        CISLastUnionFieldStored = UnionField;
+        CISLastFieldStored = UnionField;
         if (!UnionField ||
             UnionField->getCanonicalDecl() != Field->getCanonicalDecl()) {
-          Info.Diag(E, diag::note_constexpr_access_inactive_union_member)
-            << handler.AccessKind << Field << !UnionField << UnionField;
-          return handler.failed();
+        
+          // Check to see if the field the union was initialized with and the
+          // current field are part of a common-initial-sequence - and if so,
+          // allow access.
+          const FieldDecl  *StoredField = UnionField;
+          const FieldDecl  *AccessedField = Field;
+          const RecordDecl *StoredRD = UnionField ? UnionField->getParent() : nullptr;
+          const RecordDecl *AccessedRD = Field->getParent();
+          
+          if (!StoredField || !isValidCommonInitialSequenceAccess(StoredRD, AccessedRD,
+                                                 StoredField, AccessedField,
+                                                 IsLastSubobjectPath, Info))  
+            return AccessedInvalidUnionMember();
+          
+          IsAccessingCommonInitialSequence = true; 
         }
         O = &O->getUnionValue();
-      } else
-        O = &O->getStructField(Field->getFieldIndex());
+      } else {
+        if (IsAccessingCommonInitialSequence) {
+          const RecordDecl *StoredRD = O->getStructDecl(); 
+          const RecordDecl *AccessedRD = Field->getParent();
+          const FieldDecl  *AccessedField = Field;
 
+          // Get the corresponding stored field based on the AccesseField Index.
+          const FieldDecl  *StoredField = [&] {
+            const unsigned int AFieldIndex = AccessedField->getFieldIndex();
+            
+            const unsigned int NumStoredFields =
+                std::distance(StoredRD->field_begin(), StoredRD->field_end());
+            if (NumStoredFields > AFieldIndex) {
+              int I = 0;
+              auto StoredFit = StoredRD->field_begin(),
+                   StoredFend = StoredRD->field_end();
+              while (StoredFit != StoredFend) {
+                if (I++ == AFieldIndex)
+                  return *StoredFit;
+                ++StoredFit;
+              }
+            }
+            return (FieldDecl *)nullptr;
+          }();
+          assert(I != 0);
+          if (!StoredField || !isValidCommonInitialSequenceAccess(StoredRD, AccessedRD,
+                                                 StoredField, AccessedField,
+                                                 IsLastSubobjectPath, Info))
+            return AccessedInvalidUnionMember();
+          CISLastFieldStored = StoredField;
+        }
+      
+        O = &O->getStructField(Field->getFieldIndex());
+      }
       bool WasConstQualified = ObjType.isConstQualified();
       ObjType = Field->getType();
       if (WasConstQualified && !Field->isMutable())
@@ -3852,7 +4088,7 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
   // Reserve space for the struct members.
   if (!RD->isUnion() && Result.isUninit())
     Result = APValue(APValue::UninitStruct(), RD->getNumBases(),
-                     std::distance(RD->field_begin(), RD->field_end()));
+                     std::distance(RD->field_begin(), RD->field_end()), RD);
 
   if (RD->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
@@ -3911,7 +4147,7 @@ static bool HandleConstructorCall(SourceLocation CallLoc, const LValue &This,
             *Value = APValue(FD);
           else
             *Value = APValue(APValue::UninitStruct(), CD->getNumBases(),
-                             std::distance(CD->field_begin(), CD->field_end()));
+                             std::distance(CD->field_begin(), CD->field_end()), CD);
         }
         if (!HandleLValueMember(Info, I->getInit(), Subobject, FD))
           return false;
@@ -5232,7 +5468,7 @@ static bool HandleClassZeroInitialization(EvalInfo &Info, const Expr *E,
   assert(!RD->isUnion() && "Expected non-union class type");
   const CXXRecordDecl *CD = dyn_cast<CXXRecordDecl>(RD);
   Result = APValue(APValue::UninitStruct(), CD ? CD->getNumBases() : 0,
-                   std::distance(RD->field_begin(), RD->field_end()));
+                   std::distance(RD->field_begin(), RD->field_end()), RD);
 
   if (RD->isInvalidDecl()) return false;
   const ASTRecordLayout &Layout = Info.Ctx.getASTRecordLayout(RD);
@@ -5362,7 +5598,7 @@ bool RecordExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
   assert((!isa<CXXRecordDecl>(RD) || !cast<CXXRecordDecl>(RD)->getNumBases()) &&
          "initializer list for class with base classes");
   Result = APValue(APValue::UninitStruct(), 0,
-                   std::distance(RD->field_begin(), RD->field_end()));
+                   std::distance(RD->field_begin(), RD->field_end()), RD);
   unsigned ElementNo = 0;
   bool Success = true;
   for (const auto *Field : RD->fields()) {
@@ -5470,7 +5706,7 @@ bool RecordExprEvaluator::VisitCXXStdInitializerListExpr(
     return Error(E);
 
   // FIXME: What if the initializer_list type has base classes, etc?
-  Result = APValue(APValue::UninitStruct(), 0, 2);
+  Result = APValue(APValue::UninitStruct(), 0, 2, Record);
   Array.moveInto(Result.getStructField(0));
 
   if (++Field == Record->field_end())
@@ -5764,7 +6000,7 @@ namespace {
         return Error(E);
 
       Result = APValue(APValue::UninitArray(), 0,
-                       CAT->getSize().getZExtValue());
+                       CAT->getSize().getZExtValue(), CAT);
       if (!Result.hasArrayFiller()) return true;
 
       // Zero-initialize all elements.
@@ -5824,7 +6060,7 @@ bool ArrayExprEvaluator::VisitInitListExpr(const InitListExpr *E) {
   if (NumEltsToInit != NumElts && !isa<ImplicitValueInitExpr>(FillerExpr))
     NumEltsToInit = NumElts;
 
-  Result = APValue(APValue::UninitArray(), NumEltsToInit, NumElts);
+  Result = APValue(APValue::UninitArray(), NumEltsToInit, NumElts, CAT);
 
   // If the array was previously zero-initialized, preserve the
   // zero-initialized values.
@@ -5878,7 +6114,7 @@ bool ArrayExprEvaluator::VisitCXXConstructExpr(const CXXConstructExpr *E,
       HadZeroInit && Value->hasArrayFiller() ? Value->getArrayFiller()
                                              : APValue();
 
-    *Value = APValue(APValue::UninitArray(), N, N);
+    *Value = APValue(APValue::UninitArray(), N, N, CAT);
 
     if (HadZeroInit)
       for (unsigned I = 0; I != N; ++I)

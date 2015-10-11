@@ -105,14 +105,15 @@ struct APValue::MemberPointerData : MemberPointerBase {
 
 // FIXME: Reduce the malloc traffic here.
 
-APValue::Arr::Arr(unsigned NumElts, unsigned Size) :
+APValue::Arr::Arr(unsigned NumElts, unsigned Size, const ConstantArrayType *Ty) :
   Elts(new APValue[NumElts + (NumElts != Size ? 1 : 0)]),
-  NumElts(NumElts), ArrSize(Size) {}
+  NumElts(NumElts), ArrSize(Size), ArrayTy(Ty) {}
 APValue::Arr::~Arr() { delete [] Elts; }
 
-APValue::StructData::StructData(unsigned NumBases, unsigned NumFields) :
+APValue::StructData::StructData(unsigned NumBases, unsigned NumFields, 
+                                const RecordDecl *RD) :
   Elts(new APValue[NumBases+NumFields]),
-  NumBases(NumBases), NumFields(NumFields) {}
+  NumBases(NumBases), NumFields(NumFields), Struct(RD) {}
 APValue::StructData::~StructData() {
   delete [] Elts;
 }
@@ -157,14 +158,16 @@ APValue::APValue(const APValue &RHS) : Kind(Uninitialized) {
                 RHS.getLValueCallIndex());
     break;
   case Array:
-    MakeArray(RHS.getArrayInitializedElts(), RHS.getArraySize());
+    MakeArray(RHS.getArrayInitializedElts(), RHS.getArraySize(),
+              RHS.getArrayType());
     for (unsigned I = 0, N = RHS.getArrayInitializedElts(); I != N; ++I)
       getArrayInitializedElt(I) = RHS.getArrayInitializedElt(I);
     if (RHS.hasArrayFiller())
       getArrayFiller() = RHS.getArrayFiller();
     break;
   case Struct:
-    MakeStruct(RHS.getStructNumBases(), RHS.getStructNumFields());
+    MakeStruct(RHS.getStructNumBases(), RHS.getStructNumFields(), 
+      RHS.getStructDecl());
     for (unsigned I = 0, N = RHS.getStructNumBases(); I != N; ++I)
       getStructBase(I) = RHS.getStructBase(I);
     for (unsigned I = 0, N = RHS.getStructNumFields(); I != N; ++I)
@@ -633,9 +636,10 @@ void APValue::MakeLValue() {
   Kind = LValue;
 }
 
-void APValue::MakeArray(unsigned InitElts, unsigned Size) {
+void APValue::MakeArray(unsigned InitElts, unsigned Size, 
+                        const ConstantArrayType *Ty) {
   assert(isUninit() && "Bad state change");
-  new ((void*)(char*)Data.buffer) Arr(InitElts, Size);
+  new ((void*)(char*)Data.buffer) Arr(InitElts, Size, Ty);
   Kind = Array;
 }
 

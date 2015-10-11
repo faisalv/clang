@@ -31,7 +31,8 @@ namespace clang {
   class ValueDecl;
   class CXXRecordDecl;
   class QualType;
-
+  class RecordDecl;
+  class ConstantArrayType;
 /// APValue - This class implements a discriminated union of [uninitialized]
 /// [APSInt] [APFloat], [Complex APSInt] [Complex APFloat], [Expr + Offset],
 /// [Vector: N * APValue], [Array: N * APValue]
@@ -86,14 +87,16 @@ private:
   struct Arr {
     APValue *Elts;
     unsigned NumElts, ArrSize;
-    Arr(unsigned NumElts, unsigned ArrSize);
+    const ConstantArrayType *ArrayTy;
+    Arr(unsigned NumElts, unsigned ArrSize, const ConstantArrayType *Ty);
     ~Arr();
   };
   struct StructData {
     APValue *Elts;
     unsigned NumBases;
     unsigned NumFields;
-    StructData(unsigned NumBases, unsigned NumFields);
+    const RecordDecl *Struct;
+    StructData(unsigned NumBases, unsigned NumFields, const RecordDecl *RD);
     ~StructData();
   };
   struct UnionData {
@@ -144,11 +147,12 @@ public:
       : Kind(Uninitialized) {
     MakeLValue(); setLValue(B, O, Path, OnePastTheEnd, CallIndex);
   }
-  APValue(UninitArray, unsigned InitElts, unsigned Size) : Kind(Uninitialized) {
-    MakeArray(InitElts, Size);
+  APValue(UninitArray, unsigned InitElts, unsigned Size,
+          const ConstantArrayType *Ty) : Kind(Uninitialized) {
+    MakeArray(InitElts, Size, Ty);
   }
-  APValue(UninitStruct, unsigned B, unsigned M) : Kind(Uninitialized) {
-    MakeStruct(B, M);
+  APValue(UninitStruct, unsigned B, unsigned M, const RecordDecl *RD) : Kind(Uninitialized) {
+    MakeStruct(B, M, RD);
   }
   explicit APValue(const FieldDecl *D, const APValue &V = APValue())
       : Kind(Uninitialized) {
@@ -295,7 +299,10 @@ public:
     assert(isArray() && "Invalid accessor");
     return ((const Arr*)(const void *)Data.buffer)->ArrSize;
   }
-
+  const ConstantArrayType *getArrayType() const {
+    assert(isArray() && "Invalid accessor");
+    return ((const Arr*)(const void *)Data.buffer)->ArrayTy;
+  }
   unsigned getStructNumBases() const {
     assert(isStruct() && "Invalid accessor");
     return ((const StructData*)(const char*)Data.buffer)->NumBases;
@@ -318,7 +325,10 @@ public:
   const APValue &getStructField(unsigned i) const {
     return const_cast<APValue*>(this)->getStructField(i);
   }
-
+  const RecordDecl *getStructDecl() const {
+    assert(isStruct() && "Invalid accessor");
+    return ((StructData*)(char*)Data.buffer)->Struct;
+  }
   const FieldDecl *getUnionField() const {
     assert(isUnion() && "Invalid accessor");
     return ((const UnionData*)(const char*)Data.buffer)->Field;
@@ -427,10 +437,10 @@ private:
     Kind = ComplexFloat;
   }
   void MakeLValue();
-  void MakeArray(unsigned InitElts, unsigned Size);
-  void MakeStruct(unsigned B, unsigned M) {
+  void MakeArray(unsigned InitElts, unsigned Size, const ConstantArrayType *Ty);
+  void MakeStruct(unsigned B, unsigned M, const RecordDecl *RD) {
     assert(isUninit() && "Bad state change");
-    new ((void*)(char*)Data.buffer) StructData(B, M);
+    new ((void*)(char*)Data.buffer) StructData(B, M, RD);
     Kind = Struct;
   }
   void MakeUnion() {
