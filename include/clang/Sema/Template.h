@@ -46,7 +46,14 @@ namespace clang {
     /// \brief The template argument lists, stored from the innermost template
     /// argument list (first) to the outermost template argument list (last).
     SmallVector<ArgList, 4> TemplateArgumentLists;
-    
+
+    // If we do not have a template argument for a certain depth, we typically
+    // adjust the depth of the new parameter by subtracting this value from it,
+    // if it is provided, else if not provided TreeTransform will subtract the
+    // number of levels of template argument lists provided to set the new depth
+    // of the unsubstitutable template parameter decl.
+    Optional<unsigned> AdjustmentForUnsubstitutableTemplateParameters;
+
   public:
     /// \brief Construct an empty set of template argument lists.
     MultiLevelTemplateArgumentList() { }
@@ -60,7 +67,14 @@ namespace clang {
     /// \brief Determine the number of levels in this template argument
     /// list.
     unsigned getNumLevels() const { return TemplateArgumentLists.size(); }
-    
+    unsigned getAdjustmentForUnsubstitutableTemplateParmeters() const {
+      if (!AdjustmentForUnsubstitutableTemplateParameters)
+        return getNumLevels();
+      return AdjustmentForUnsubstitutableTemplateParameters.getValue();
+    }
+    void setAdjustmentForUnsubstitutableTemplateParmeters(unsigned Val) {
+      AdjustmentForUnsubstitutableTemplateParameters = Val;
+    }
     /// \brief Retrieve the template argument at a given depth and index.
     const TemplateArgument &operator()(unsigned Depth, unsigned Index) const {
       assert(Depth < TemplateArgumentLists.size());
@@ -107,6 +121,10 @@ namespace clang {
     /// \brief Retrieve the innermost template argument list.
     const ArgList &getInnermost() const { 
       return TemplateArgumentLists.front(); 
+    }
+    const ArgList &getArgList(unsigned Idx) const {
+      assert(Idx < TemplateArgumentLists.size());
+      return TemplateArgumentLists[Idx];
     }
   };
   
@@ -189,6 +207,20 @@ namespace clang {
         const Decl *, llvm::PointerUnion<Decl *, DeclArgumentPack *>, 4>
     LocalDeclsMap;
 
+    // When deducing against class template deducers, we can refer to member
+    // templates from a class specialization and we need to be able to map back
+    // to the member template nodes connected to the implicit specialization
+    // from a non-specialized stub that contains the deducer functions.
+
+    // template<class T> struct A {
+    //    template<class U, class V> struct B { /*B(U,V) { }*/ };
+    //    template<class U> A(B<T,U>) { }
+    // };
+    // A a{A<int*>::B<int*,float*>{}};
+
+    typedef llvm::SmallDenseMap<const TemplateDecl *, const TemplateDecl *, 4>
+    TemplateDeclsMapType;
+    
     /// \brief A mapping from local declarations that occur
     /// within a template to their instantiations.
     ///
@@ -243,11 +275,19 @@ namespace clang {
     void operator=(const LocalInstantiationScope &) = delete;
 
   public:
-    LocalInstantiationScope(Sema &SemaRef, bool CombineWithOuterScope = false)
-      : SemaRef(SemaRef), Outer(SemaRef.CurrentInstantiationScope),
-        Exited(false), CombineWithOuterScope(CombineWithOuterScope),
-        PartiallySubstitutedPack(nullptr)
-    {
+    using TemplateDeclsMap = TemplateDeclsMapType;
+    TemplateDeclsMap *TemplateDecls = nullptr;
+    LocalInstantiationScope(Sema &SemaRef, bool CombineWithOuterScope = false,
+                            TemplateDeclsMap *TemplateDecls = nullptr)
+        : SemaRef(SemaRef), Outer(SemaRef.CurrentInstantiationScope),
+          Exited(false), CombineWithOuterScope(CombineWithOuterScope),
+          PartiallySubstitutedPack(nullptr),
+          TemplateDecls(
+              TemplateDecls
+                  ? TemplateDecls
+                  : SemaRef.CurrentInstantiationScope
+                        ? SemaRef.CurrentInstantiationScope->TemplateDecls
+                        : nullptr) {
       SemaRef.CurrentInstantiationScope = this;
     }
 

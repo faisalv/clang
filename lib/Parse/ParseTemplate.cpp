@@ -1040,7 +1040,7 @@ bool Parser::AnnotateTemplateIdToken(TemplateTy Template, TemplateNameKind TNK,
 /// If there was a failure when forming the type from the template-id,
 /// a type annotation token will still be created, but will have a
 /// NULL type pointer to signify an error.
-void Parser::AnnotateTemplateIdTokenAsType() {
+void Parser::AnnotateTemplateIdTokenAsType(bool AllowPartialTemplateId) {
   assert(Tok.is(tok::annot_template_id) && "Requires template-id tokens");
 
   TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Tok);
@@ -1050,15 +1050,17 @@ void Parser::AnnotateTemplateIdTokenAsType() {
 
   ASTTemplateArgsPtr TemplateArgsPtr(TemplateId->getTemplateArgs(),
                                      TemplateId->NumArgs);
-
-  TypeResult Type
+  TypeResult Type 
     = Actions.ActOnTemplateIdType(TemplateId->SS,
                                   TemplateId->TemplateKWLoc,
                                   TemplateId->Template,
                                   TemplateId->TemplateNameLoc,
                                   TemplateId->LAngleLoc,
                                   TemplateArgsPtr,
-                                  TemplateId->RAngleLoc);
+                                  TemplateId->RAngleLoc,
+                                  /*IsCtorOrDtorName*/false,
+                                  AllowPartialTemplateId);
+
   // Create the new "type" annotation token.
   Tok.setKind(tok::annot_typename);
   setTypeAnnotation(Tok, Type.isInvalid() ? nullptr : Type.get());
@@ -1153,7 +1155,6 @@ ParsedTemplateArgument Parser::ParseTemplateTemplateArgument() {
   
   return Result;
 }
-
 /// ParseTemplateArgument - Parse a C++ template argument (C++ [temp.names]).
 ///
 ///       template-argument: [C++ 14.2]
@@ -1173,7 +1174,6 @@ ParsedTemplateArgument Parser::ParseTemplateArgument() {
                                        Declarator::TemplateTypeArgContext);
     if (TypeArg.isInvalid())
       return ParsedTemplateArgument();
-    
     return ParsedTemplateArgument(ParsedTemplateArgument::Type,
                                   TypeArg.get().getAsOpaquePtr(), 
                                   Loc);

@@ -2587,7 +2587,7 @@ Parser::DiagnoseMissingSemiAfterTagDefinition(DeclSpec &DS, AccessSpecifier AS,
   ParseDeclarationSpecifiers(DS, NotATemplate, AS, DSContext, LateAttrs);
   return false;
 }
-
+extern bool isClassTemplateDeductionEnabled();
 /// ParseDeclarationSpecifiers
 ///       declaration-specifiers: [C99 6.7]
 ///         storage-class-specifier declaration-specifiers[opt]
@@ -2633,6 +2633,22 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
   ParsedAttributesWithRange attrs(AttrFactory);
   // We use Sema's policy to get bool macros right.
   const PrintingPolicy &Policy = Actions.getPrintingPolicy();
+  const auto MightBeTokenFollowingClassOrAliasTemplateNameAllowingForDeduction =
+      [](Token NextTok) {
+    // Note, if you are tempted to check for template info to make sure we are
+    // not in a template declartion to limit when these constructs can be parsed
+    // (an initial attempt), don't forget variable templates can also use class
+    // template deduction, such as template<template<class T> class TT, class T>
+    // auto var = TT{T{}};
+
+    // Only allow type template name or partial type template id if it is
+    // followed by an 'identifier' or a '(' i.e. template<class T> struct X; X x
+    //  or  X (((x)))
+    // and since ParseDeclarationSpecifiers is called when parsing new
+    // expressions, also allow following a brace new X{}
+    return isClassTemplateDeductionEnabled() &&
+           NextTok.isOneOf(tok::identifier, tok::l_paren, tok::l_brace);
+  };
   while (1) {
     bool isInvalid = false;
     bool isStorageClass = false;
@@ -2835,12 +2851,17 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
           << Next.getIdentifierInfo() << 1 /* type */;
       }
 
-      ParsedType TypeRep =
-          Actions.getTypeName(*Next.getIdentifierInfo(), Next.getLocation(),
-                              getCurScope(), &SS, false, false, nullptr,
-                              /*IsCtorOrDtorName=*/false,
-                              /*NonTrivialSourceInfo=*/true);
+      ParsedType TypeRep = Actions.getTypeName(*Next.getIdentifierInfo(),
+                                               Next.getLocation(),
+                                               getCurScope(), &SS,
+                                               false, false, ParsedType(),
+                                               /*IsCtorOrDtorName=*/false,
+                                               /*NonTrivialSourceInfo=*/true,
+                                               /*CorrectedII*/ nullptr,
+            MightBeTokenFollowingClassOrAliasTemplateNameAllowingForDeduction(
+                                                              PP.LookAhead(1)));
 
+      
       // If the referenced identifier is not a type, then this declspec is
       // erroneous: We already checked about that it has no type specifier, and
       // C++ doesn't have implicit int.  Diagnose it as a typo w.r.t. to the
@@ -2955,7 +2976,21 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
 
       ParsedType TypeRep =
         Actions.getTypeName(*Tok.getIdentifierInfo(),
-                            Tok.getLocation(), getCurScope());
+                            Tok.getLocation(), getCurScope(),
+                            /*CXXScopeSpec*/ nullptr, /*IsClassName*/ false,
+                            /*HasTrailingDot*/ false, 
+                            /*ObjectType*/ ParsedType(),
+                            /*IsCtorOrDtorName*/ false, 
+                            /*WantNontrivialTypeSourceInfo*/ false,
+                            /*CorrectedII*/ nullptr,
+              MightBeTokenFollowingClassOrAliasTemplateNameAllowingForDeduction(
+                                                                  NextToken()));
+
+      // I don;t think we need this FIXME anymore!
+      // FIXME: Check that getTypeName only returns an auto-type with CT
+      // requiring deduction if it is a canonical deduction function (i.e. it
+      // has a template declaration - and if not, then we are declarating a
+      // variable, and the ctor arguments will be used to deduce a ctor)
 
       // MSVC: If we weren't able to parse a default template argument, and it's
       // just a simple identifier, create a DependentNameType.  This will allow
@@ -3034,7 +3069,9 @@ void Parser::ParseDeclarationSpecifiers(DeclSpec &DS,
 
       // Turn the template-id annotation token into a type annotation
       // token, then try again to parse it as a type-specifier.
-      AnnotateTemplateIdTokenAsType();
+      AnnotateTemplateIdTokenAsType(
+          MightBeTokenFollowingClassOrAliasTemplateNameAllowingForDeduction(
+                                                                  NextToken()));
       continue;
     }
 

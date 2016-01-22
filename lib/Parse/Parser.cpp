@@ -1618,7 +1618,8 @@ bool Parser::TryAnnotateTypeOrScopeToken(bool EnteringContext, bool NeedType) {
       // FIXME: check whether the next token is '<', first!
       Ty = Actions.ActOnTypenameType(getCurScope(), TypenameLoc, SS, 
                                      *Tok.getIdentifierInfo(),
-                                     Tok.getLocation());
+                                     Tok.getLocation(), 
+              NextToken().isOneOf(tok::identifier, tok::l_brace, tok::l_paren));
     } else if (Tok.is(tok::annot_template_id)) {
       TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Tok);
       if (TemplateId->Kind != TNK_Type_template &&
@@ -1674,13 +1675,18 @@ bool Parser::TryAnnotateTypeOrScopeTokenAfterScopeSpec(bool EnteringContext,
                                                        bool IsNewScope) {
   if (Tok.is(tok::identifier)) {
     IdentifierInfo *CorrectedII = nullptr;
+    extern bool isClassTemplateDeductionEnabled();
     // Determine whether the identifier is a type name.
-    if (ParsedType Ty = Actions.getTypeName(
-            *Tok.getIdentifierInfo(), Tok.getLocation(), getCurScope(), &SS,
-            false, NextToken().is(tok::period), nullptr,
-            /*IsCtorOrDtorName=*/false,
-            /*NonTrivialTypeSourceInfo*/ true,
-            NeedType ? &CorrectedII : nullptr)) {
+    if (ParsedType Ty = Actions.getTypeName(*Tok.getIdentifierInfo(),
+                                            Tok.getLocation(), getCurScope(),
+                                            &SS, false, 
+                                            NextToken().is(tok::period),
+                                            ParsedType(),
+                                            /*IsCtorOrDtorName=*/false,
+                                            /*NonTrivialTypeSourceInfo*/ true,
+                                            NeedType ? &CorrectedII
+                                                     : nullptr,
+           isClassTemplateDeductionEnabled() && NextToken().isOneOf(tok::identifier, tok::l_paren, tok::l_brace))) {
       // A FixIt was applied as a result of typo correction
       if (CorrectedII)
         Tok.setIdentifierInfo(CorrectedII);
@@ -1757,11 +1763,14 @@ bool Parser::TryAnnotateTypeOrScopeTokenAfterScopeSpec(bool EnteringContext,
   if (Tok.is(tok::annot_template_id)) {
     TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Tok);
     if (TemplateId->Kind == TNK_Type_template) {
+      extern bool isClassTemplateDeductionEnabled();
       // A template-id that refers to a type was parsed into a
       // template-id annotation in a context where we weren't allowed
       // to produce a type annotation token. Update the template-id
       // annotation token to a type annotation token now.
-      AnnotateTemplateIdTokenAsType();
+      AnnotateTemplateIdTokenAsType(
+          NextToken().isOneOf(tok::identifier, tok::l_paren, tok::l_brace) &&
+          isClassTemplateDeductionEnabled());
       return false;
     }
   }

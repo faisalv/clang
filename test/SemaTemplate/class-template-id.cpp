@@ -38,9 +38,9 @@ N::C<int> c1;
 typedef N::C<float> c2;
 
 // PR5655
-template<typename T> struct Foo { }; // expected-note{{template is declared here}}
+template<typename T> struct Foo { }; // expected-note 3{{candidate}}
 
-void f(void) { Foo bar; } // expected-error{{use of class template 'Foo' requires template arguments}}
+void f(void) { Foo bar; } // expected-error{{missing template arguments}}
 
 // rdar://problem/8254267
 template <typename T> class Party;

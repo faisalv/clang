@@ -30,7 +30,31 @@ using namespace sema;
 //===----------------------------------------------------------------------===/
 // Template Instantiation Support
 //===----------------------------------------------------------------------===/
+CXXRecordDecl* isSubstitutingIntoClassTemplateDeducerThatContainsDecl(Sema &S,
+                                                                const Decl *D);
+std::pair<ArrayRef<TemplateArgument>, ArrayRef<TemplateArgument>>
+splitTemplateArgumentListIntoClassAndMemberTemplateArguments(
+    ArrayRef<TemplateArgument> DeducedArgs,
+    const unsigned NumClassTemplateParams);
 
+ArrayRef<TemplateArgument>
+getTemplateArgumentListBeingSubstitutedIntoClassTemplateDeducer(
+    Sema &S, const DeclContext *D);
+
+bool isClassTemplateUndergoingDeduction(Sema &S, const CXXRecordDecl *D) {
+  if (!D) return false;
+  const SmallVectorImpl<Sema::ActiveTemplateInstantiation> &Instantiations =
+      S.ActiveTemplateInstantiations;
+  if (!Instantiations.size())
+    return false;
+  for (unsigned I = Instantiations.size(); I--;)
+    if (Instantiations[I].Kind ==
+            Sema::ActiveTemplateInstantiation::
+                DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer &&
+        Instantiations[I].Entity->getDeclContext() == D)
+      return true;
+  return false;
+}
 /// \brief Retrieve the template argument list(s) that should be used to
 /// instantiate the definition of the given declaration.
 ///
@@ -165,13 +189,25 @@ Sema::getTemplateInstantiationArgs(NamedDecl *D,
       }
     } else if (CXXRecordDecl *Rec = dyn_cast<CXXRecordDecl>(Ctx)) {
       if (ClassTemplateDecl *ClassTemplate = Rec->getDescribedClassTemplate()) {
-        QualType T = ClassTemplate->getInjectedClassNameSpecialization();
-        const TemplateSpecializationType *TST =
-            cast<TemplateSpecializationType>(Context.getCanonicalType(T));
-        Result.addOuterTemplateArguments(
-            llvm::makeArrayRef(TST->getArgs(), TST->getNumArgs()));
-        if (ClassTemplate->isMemberSpecialization())
-          break;
+        if (isClassTemplateUndergoingDeduction(*this, Rec)) {
+          // Rec is the pattern of the class template undergoing deduction, so
+          // get the template arguments deduced for this class template from the
+          // instantiation stack.
+          auto TwoLevelArgs =
+              splitTemplateArgumentListIntoClassAndMemberTemplateArguments(
+                  getTemplateArgumentListBeingSubstitutedIntoClassTemplateDeducer(
+                      *this, Rec),
+                  ClassTemplate->getTemplateParameters()->size());
+          Result.addOuterTemplateArguments(TwoLevelArgs.first);
+        } else {
+          QualType T = ClassTemplate->getInjectedClassNameSpecialization();
+          const TemplateSpecializationType *TST =
+              cast<TemplateSpecializationType>(Context.getCanonicalType(T));
+          Result.addOuterTemplateArguments(
+              llvm::makeArrayRef(TST->getArgs(), TST->getNumArgs()));
+          if (ClassTemplate->isMemberSpecialization())
+            break;
+        }
       }
     }
 
@@ -190,6 +226,7 @@ bool Sema::ActiveTemplateInstantiation::isInstantiationRecord() const {
   case DefaultFunctionArgumentInstantiation:
   case ExplicitTemplateArgumentSubstitution:
   case DeducedTemplateArgumentSubstitution:
+  case DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer:
   case PriorTemplateArgumentSubstitution:
     return true;
 
@@ -469,6 +506,8 @@ void Sema::PrintInstantiationStack() {
       break;
     }
 
+    case ActiveTemplateInstantiation::
+        DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer:
     case ActiveTemplateInstantiation::DeducedTemplateArgumentSubstitution:
       if (ClassTemplatePartialSpecializationDecl *PartialSpec =
             dyn_cast<ClassTemplatePartialSpecializationDecl>(Active->Entity)) {
@@ -595,6 +634,8 @@ Optional<TemplateDeductionInfo *> Sema::isSFINAEContext() const {
 
     case ActiveTemplateInstantiation::ExplicitTemplateArgumentSubstitution:
     case ActiveTemplateInstantiation::DeducedTemplateArgumentSubstitution:
+    case ActiveTemplateInstantiation::
+        DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer:
       // We're either substitution explicitly-specified template arguments
       // or deduced template arguments, so SFINAE applies.
       assert(Active->DeductionInfo && "Missing deduction info pointer");
@@ -707,7 +748,8 @@ namespace {
 
     /// \brief Transform the given declaration by instantiating a reference to
     /// this declaration.
-    Decl *TransformDecl(SourceLocation Loc, Decl *D);
+    Decl *TransformDecl(SourceLocation Loc, Decl *D,
+                        CXXScopeSpec *TransformedPrecedingSS = nullptr);
 
     void transformAttrs(Decl *Old, Decl *New) { 
       SemaRef.InstantiateAttrs(TemplateArgs, Old, New);
@@ -775,7 +817,20 @@ namespace {
                                             NonTypeTemplateParmDecl *D);
     ExprResult TransformSubstNonTypeTemplateParmPackExpr(
                                            SubstNonTypeTemplateParmPackExpr *E);
+    ExprResult TransformSubstNonTypeTemplateParmExpr(
+                                          SubstNonTypeTemplateParmExpr *E) {
+      // When doing class template deduction using template aliases and
+      // constructors, we can end up with non-type-template parameters
+      // substituted with other nttps, and they still need to be transformed.
+      // template<int N, int M> struct X { X(const int (&)[N], const int (&)[M]); };
+      // template<int N> using TA = X<N, N+1>;
 
+      Expr *OldReplacement = E->getReplacement();
+      ExprResult Res = getDerived().TransformExpr(OldReplacement);
+      if (Res.isInvalid()) return Res;
+      if (Res.get() == OldReplacement) return E;
+      return Res;
+    }
     /// \brief Rebuild a DeclRefExpr for a ParmVarDecl reference.
     ExprResult RebuildParmVarDeclRefExpr(ParmVarDecl *PD, SourceLocation Loc);
 
@@ -859,7 +914,8 @@ getPackSubstitutedTemplateArgument(Sema &S, TemplateArgument Arg) {
   return Arg;
 }
 
-Decl *TemplateInstantiator::TransformDecl(SourceLocation Loc, Decl *D) {
+Decl *TemplateInstantiator::TransformDecl(SourceLocation Loc, Decl *D,
+                                         CXXScopeSpec *TransformedPrecedingSS) {
   if (!D)
     return nullptr;
 
@@ -891,7 +947,8 @@ Decl *TemplateInstantiator::TransformDecl(SourceLocation Loc, Decl *D) {
     // template parameter.
   }
 
-  return SemaRef.FindInstantiatedDecl(Loc, cast<NamedDecl>(D), TemplateArgs);
+  return SemaRef.FindInstantiatedDecl(Loc, cast<NamedDecl>(D), TemplateArgs,
+                                      TransformedPrecedingSS);
 }
 
 Decl *TemplateInstantiator::TransformDefinition(SourceLocation Loc, Decl *D) {
@@ -1366,10 +1423,10 @@ TemplateInstantiator::TransformTemplateTypeParmType(TypeLocBuilder &TLB,
            "Template argument kind mismatch");
 
     QualType Replacement = Arg.getAsType();
-
+    QualType CanonReplacement = getSema().Context.getCanonicalType(Replacement);
     // TODO: only do this uniquing once, at the start of instantiation.
     QualType Result
-      = getSema().Context.getSubstTemplateTypeParmType(T, Replacement);
+      = getSema().Context.getSubstTemplateTypeParmType(T, CanonReplacement);
     SubstTemplateTypeParmTypeLoc NewTL
       = TLB.push<SubstTemplateTypeParmTypeLoc>(Result);
     NewTL.setNameLoc(TL.getNameLoc());
@@ -1387,7 +1444,7 @@ TemplateInstantiator::TransformTemplateTypeParmType(TypeLocBuilder &TLB,
 
   QualType Result
     = getSema().Context.getTemplateTypeParmType(T->getDepth()
-                                                 - TemplateArgs.getNumLevels(),
+              - TemplateArgs.getAdjustmentForUnsubstitutableTemplateParmeters(),
                                                 T->getIndex(),
                                                 T->isParameterPack(),
                                                 NewTTPDecl);
@@ -1923,7 +1980,23 @@ Sema::InstantiateClass(SourceLocation PointOfInstantiation,
                        CXXRecordDecl *Instantiation, CXXRecordDecl *Pattern,
                        const MultiLevelTemplateArgumentList &TemplateArgs,
                        TemplateSpecializationKind TSK,
-                       bool Complain) {
+                       bool Complain, 
+                       const bool InstantiateCtorsOnlyForDeduction) {
+  assert([&] {
+    if (!InstantiateCtorsOnlyForDeduction) return true;
+    // assert that the pattern must be deeper than the TemplateArgs or
+    // TemplateArgs innermost must contain a dependent arg.
+    ClassTemplateDecl *CTD = Pattern->getDescribedClassTemplate();
+    assert(CTD);
+    if (TemplateArgs.getNumLevels() <= CTD->getTemplateParameters()->getDepth())
+      return true;
+    
+    for (auto &TA : TemplateArgs.getInnermost()) {
+      if (TA.isDependent())
+        return true;
+    }
+    return false;
+  }());
   CXXRecordDecl *PatternDef
     = cast_or_null<CXXRecordDecl>(Pattern->getDefinition());
   if (DiagnoseUninstantiableTemplate(*this, PointOfInstantiation, Instantiation,

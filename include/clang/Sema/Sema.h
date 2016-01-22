@@ -1489,7 +1489,8 @@ public:
                          ParsedType ObjectType = nullptr,
                          bool IsCtorOrDtorName = false,
                          bool WantNontrivialTypeSourceInfo = false,
-                         IdentifierInfo **CorrectedII = nullptr);
+                         IdentifierInfo **CorrectedII = nullptr,
+                         bool ConvertClassTemplateTypType = false);
   TypeSpecifierType isTagName(IdentifierInfo &II, Scope *S);
   bool isMicrosoftMissingTypename(const CXXScopeSpec *SS, Scope *S);
   void DiagnoseUnknownTypeName(IdentifierInfo *&II,
@@ -1686,10 +1687,14 @@ public:
                           SmallVectorImpl<CXXMethodDecl*> &OverloadedMethods);
   void NoteHiddenVirtualMethods(CXXMethodDecl *MD,
                           SmallVectorImpl<CXXMethodDecl*> &OverloadedMethods);
-  // Returns true if the function declaration is a redeclaration
-  bool CheckFunctionDeclaration(Scope *S,
-                                FunctionDecl *NewFD, LookupResult &Previous,
+
+  // Returns true if the function declaration is a redeclaration. NewFD is
+  // passed in by reference incase we need to convert a method-decl into a
+  // non-method-decl for class template deducer at class scope.
+  bool CheckFunctionDeclaration(Scope *S, FunctionDecl *&NewFD,
+                                LookupResult &Previous,
                                 bool IsExplicitSpecialization);
+
   void CheckMain(FunctionDecl *FD, const DeclSpec &D);
   void CheckMSVCRTEntryPoint(FunctionDecl *FD);
   Decl *ActOnParamDeclarator(Scope *S, Declarator &D);
@@ -4355,7 +4360,8 @@ public:
   /// \brief Determine if a special member function should have a deleted
   /// definition when it is defaulted.
   bool ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
-                                 bool Diagnose = false);
+                                 bool Diagnose = false, 
+                                 bool DeclaringConstructorForDeduction = false);
 
   /// \brief Declare the implicit default constructor for the given class.
   ///
@@ -4364,7 +4370,8 @@ public:
   ///
   /// \returns The implicitly-declared default constructor.
   CXXConstructorDecl *DeclareImplicitDefaultConstructor(
-                                                     CXXRecordDecl *ClassDecl);
+                                                     CXXRecordDecl *ClassDecl,
+                                   bool DeclareConstructorForDeduction = false);
 
   /// DefineImplicitDefaultConstructor - Checks for feasibility of
   /// defining this constructor as the default constructor.
@@ -4407,7 +4414,8 @@ public:
   /// copy constructor will be added.
   ///
   /// \returns The implicitly-declared copy constructor.
-  CXXConstructorDecl *DeclareImplicitCopyConstructor(CXXRecordDecl *ClassDecl);
+  CXXConstructorDecl *DeclareImplicitCopyConstructor(CXXRecordDecl *ClassDecl, 
+                                 bool DeclaringConstructorForDeduction = false);
 
   /// DefineImplicitCopyConstructor - Checks for feasibility of
   /// defining this constructor as the copy constructor.
@@ -4421,8 +4429,8 @@ public:
   ///
   /// \returns The implicitly-declared move constructor, or NULL if it wasn't
   /// declared.
-  CXXConstructorDecl *DeclareImplicitMoveConstructor(CXXRecordDecl *ClassDecl);
-
+  CXXConstructorDecl *DeclareImplicitMoveConstructor(CXXRecordDecl *ClassDecl, 
+                                 bool DeclaringConstructorForDeduction = false);
   /// DefineImplicitMoveConstructor - Checks for feasibility of
   /// defining this constructor as the move constructor.
   void DefineImplicitMoveConstructor(SourceLocation CurrentLocation,
@@ -5633,7 +5641,9 @@ public:
 
   QualType CheckTemplateIdType(TemplateName Template,
                                SourceLocation TemplateLoc,
-                              TemplateArgumentListInfo &TemplateArgs);
+                              TemplateArgumentListInfo &TemplateArgs, 
+                              bool AllowPartialArgs = false,
+             bool AttemptCompletingClassTemplateIdUponDeductionFailure = false);
 
   TypeResult
   ActOnTemplateIdType(CXXScopeSpec &SS, SourceLocation TemplateKWLoc,
@@ -5641,7 +5651,8 @@ public:
                       SourceLocation LAngleLoc,
                       ASTTemplateArgsPtr TemplateArgs,
                       SourceLocation RAngleLoc,
-                      bool IsCtorOrDtorName = false);
+                      bool IsCtorOrDtorName = false,
+                      bool AllowPartialArgs = false);
 
   /// \brief Parsed an elaborated-type-specifier that refers to a template-id,
   /// such as \c class T::template apply<U>.
@@ -5805,12 +5816,18 @@ public:
   /// \param Converted Will receive the converted, canonicalized template
   /// arguments.
   ///
+  /// \param MissingArgsOrTrailingPack - only relevant if non-null. set 
+  /// the pointee to true if all specified args are correct, but either 
+  /// we have missing args, or we end with a trailing pack.
+  ///
   /// \returns true if an error occurred, false otherwise.
   bool CheckTemplateArgumentList(TemplateDecl *Template,
                                  SourceLocation TemplateLoc,
                                  TemplateArgumentListInfo &TemplateArgs,
                                  bool PartialTemplateArgs,
-                           SmallVectorImpl<TemplateArgument> &Converted);
+                           SmallVectorImpl<TemplateArgument> &Converted,
+                                 bool *MissingArgsOrTrailingPack = nullptr,
+                                 const TemplateName *OrigTemplateName = nullptr);
 
   bool CheckTemplateTypeArgument(TemplateTypeParmDecl *Param,
                                  TemplateArgumentLoc &Arg,
@@ -5888,7 +5905,8 @@ public:
   TypeResult
   ActOnTypenameType(Scope *S, SourceLocation TypenameLoc,
                     const CXXScopeSpec &SS, const IdentifierInfo &II,
-                    SourceLocation IdLoc);
+                    SourceLocation IdLoc,
+                    const bool ConvertClassOrAliasTemplateToType = false);
 
   /// \brief Called when the parser has parsed a C++ typename
   /// specifier that ends in a template-id, e.g.,
@@ -5911,13 +5929,15 @@ public:
                     SourceLocation TemplateNameLoc,
                     SourceLocation LAngleLoc,
                     ASTTemplateArgsPtr TemplateArgs,
-                    SourceLocation RAngleLoc);
+                    SourceLocation RAngleLoc,
+                    const bool ConvertClassOrAliasTemplateToType = false);
 
   QualType CheckTypenameType(ElaboratedTypeKeyword Keyword,
                              SourceLocation KeywordLoc,
                              NestedNameSpecifierLoc QualifierLoc,
                              const IdentifierInfo &II,
-                             SourceLocation IILoc);
+                             SourceLocation IILoc,
+                          const bool ConvertClassOrAliasTemplateToType = false);
 
   TypeSourceInfo *RebuildTypeInCurrentInstantiation(TypeSourceInfo *T,
                                                     SourceLocation Loc,
@@ -6511,6 +6531,11 @@ public:
       /// a FunctionTemplateDecl.
       DeducedTemplateArgumentSubstitution,
 
+      /// We are substituting template arguments determined as part of template
+      /// argument deduction for a class template through its constructor or 
+      /// non-constructor deducers
+      DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer,
+
       /// We are substituting prior template arguments into a new
       /// template parameter. The template parameter itself is either a
       /// NonTypeTemplateParmDecl or a TemplateTemplateParmDecl.
@@ -6580,6 +6605,7 @@ public:
       case DefaultTemplateArgumentInstantiation:
       case ExplicitTemplateArgumentSubstitution:
       case DeducedTemplateArgumentSubstitution:
+      case DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer:
       case DefaultFunctionArgumentInstantiation:
         return X.TemplateArgs == Y.TemplateArgs;
 
@@ -6850,6 +6876,28 @@ public:
       return SemaRef.NumSFINAEErrors > PrevSFINAEErrors;
     }
   };
+  class DiagnosticInterceptor {
+    Sema &SemaRef;
+    bool PrevDisableTypoCorrection;
+    DiagnosticInterceptor *PrevDI;
+
+  public:
+    SmallVector<PartialDiagnosticAt, 8> SuppressedDiags;
+    explicit DiagnosticInterceptor(Sema &S)
+        : SemaRef(S), PrevDisableTypoCorrection(SemaRef.DisableTypoCorrection),
+          PrevDI(SemaRef.CurDiagnosticInterceptor) {
+      SemaRef.DisableTypoCorrection = true;
+      SemaRef.CurDiagnosticInterceptor = this;
+    }
+    void disable() {
+      SemaRef.DisableTypoCorrection = PrevDisableTypoCorrection;
+      SemaRef.CurDiagnosticInterceptor = PrevDI;
+    }
+    ~DiagnosticInterceptor() {
+      disable();
+    }
+  };
+  DiagnosticInterceptor *CurDiagnosticInterceptor = nullptr;
 
   /// \brief RAII class used to indicate that we are performing provisional
   /// semantic analysis to determine the validity of a construct, so
@@ -7040,7 +7088,8 @@ public:
                    CXXRecordDecl *Instantiation, CXXRecordDecl *Pattern,
                    const MultiLevelTemplateArgumentList &TemplateArgs,
                    TemplateSpecializationKind TSK,
-                   bool Complain = true);
+                   bool Complain = true,
+                   bool InstantiateCtorsOnlyForDeduction = false);
 
   bool InstantiateEnum(SourceLocation PointOfInstantiation,
                        EnumDecl *Instantiation, EnumDecl *Pattern,
@@ -7140,7 +7189,8 @@ public:
                             const MultiLevelTemplateArgumentList &TemplateArgs);
 
   NamedDecl *FindInstantiatedDecl(SourceLocation Loc, NamedDecl *D,
-                          const MultiLevelTemplateArgumentList &TemplateArgs);
+                          const MultiLevelTemplateArgumentList &TemplateArgs,
+                          CXXScopeSpec *TransformedPrecedingSS = nullptr);
   DeclContext *FindInstantiatedContext(SourceLocation Loc, DeclContext *DC,
                           const MultiLevelTemplateArgumentList &TemplateArgs);
 

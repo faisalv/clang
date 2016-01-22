@@ -28,6 +28,8 @@
 
 using namespace clang;
 
+extern bool isClassTemplateDeductionEnabled() { return true; }
+
 namespace {
 
 /// Resets LLVM's pretty stack state so that stack traces are printed correctly
@@ -111,6 +113,7 @@ void clang::ParseAST(Preprocessor &PP, ASTConsumer *Consumer,
   ParseAST(*S.get(), PrintStats, SkipFunctionBodies);
 }
 
+
 void clang::ParseAST(Sema &S, bool PrintStats, bool SkipFunctionBodies) {
   // Collect global stats on Decls/Stmts (until we have a module streamer).
   if (PrintStats) {
@@ -177,3 +180,11 @@ void clang::ParseAST(Sema &S, bool PrintStats, bool SkipFunctionBodies) {
     Consumer->PrintStats();
   }
 }
+
+
+// Remove the following two lines. If you see this, its 
+// because I mistakenly committed these debugging related
+// changes.
+#define DONT_USE_ANON_FV
+#include "F:\clang-fv\my-code\fv_debug.cpp"
+

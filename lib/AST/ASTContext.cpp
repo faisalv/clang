@@ -1202,13 +1202,29 @@ FunctionDecl *ASTContext::getClassScopeSpecializationPattern(
 
   return Pos->second;
 }
-
 void ASTContext::setClassScopeSpecializationPattern(FunctionDecl *FD,
                                         FunctionDecl *Pattern) {
   assert(FD && "Specialization is 0");
   assert(Pattern && "Class scope specialization pattern is 0");
   ClassScopeSpecializationPattern[FD] = Pattern;
 }
+
+
+void ASTContext::addClassTemplateDeducer(const ClassTemplateDecl *CTD,
+                                FunctionTemplateDecl *FTD) {
+  assert(CTD && CTD->getCanonicalDecl() == CTD);
+  assert(FTD && FTD->getCanonicalDecl() == FTD);
+  auto &Vec = CanonicalClassTemplateDeducers[CTD];
+  assert(!Vec.count(FTD));
+  Vec.insert(FTD);
+}
+
+const llvm::SmallPtrSet<FunctionTemplateDecl *, 8>&
+ASTContext::getClassTemplateDeducers(const ClassTemplateDecl *CTD) {
+  return CanonicalClassTemplateDeducers[CTD->getCanonicalDecl()];
+}
+
+
 
 NamedDecl *
 ASTContext::getInstantiatedFromUsingDecl(UsingDecl *UUD) {
@@ -4021,6 +4037,28 @@ QualType ASTContext::getUnaryTransformType(QualType BaseType,
   return QualType(Ty, 0);
 }
 
+QualType ASTContext::getAutoTemplateType(
+    TemplateName TN, bool IsDependent,
+    ASTTemplateArgumentListInfo *ExplicitArgs) const {
+  //assert(isa<ClassTemplateDecl>(TDecl) || isa<TypeAliasTemplateDecl>(TDecl) ||
+  //       isa<TemplateTemplateParmDecl>(TDecl));
+  // Look in the folding set for an existing type.
+  void *InsertPos = nullptr;
+  llvm::FoldingSetNodeID ID;
+  AutoType::Profile(ID, QualType(),
+                    AutoTypeKeyword::TypeTemplateDeclRequiringDeduction,
+                    IsDependent,TN, ExplicitArgs);
+  if (AutoType *AT = AutoTypes.FindNodeOrInsertPos(ID, InsertPos))
+    return QualType(AT, 0);
+
+  AutoType *AT =
+      new (*this, TypeAlignment) AutoType(TN, IsDependent, ExplicitArgs);
+  Types.push_back(AT);
+  if (InsertPos)
+    AutoTypes.InsertNode(AT, InsertPos);
+  return QualType(AT, 0);
+}
+
 /// getAutoType - Return the uniqued reference to the 'auto' type which has been
 /// deduced to the given type, or to the canonical undeduced 'auto' type, or the
 /// canonical deduced-but-dependent 'auto' type.
@@ -4032,7 +4070,7 @@ QualType ASTContext::getAutoType(QualType DeducedType, AutoTypeKeyword Keyword,
   // Look in the folding set for an existing type.
   void *InsertPos = nullptr;
   llvm::FoldingSetNodeID ID;
-  AutoType::Profile(ID, DeducedType, Keyword, IsDependent);
+  AutoType::Profile(ID, DeducedType, Keyword, IsDependent, TemplateName(), nullptr);
   if (AutoType *AT = AutoTypes.FindNodeOrInsertPos(ID, InsertPos))
     return QualType(AT, 0);
 
@@ -4329,7 +4367,6 @@ TemplateName ASTContext::getCanonicalTemplateName(TemplateName Name) const {
     if (TemplateTemplateParmDecl *TTP 
           = dyn_cast<TemplateTemplateParmDecl>(Template))
       Template = getCanonicalTemplateTemplateParmDecl(TTP);
-  
     // The canonical template name is the canonical template declaration.
     return TemplateName(cast<TemplateDecl>(Template->getCanonicalDecl()));
   }

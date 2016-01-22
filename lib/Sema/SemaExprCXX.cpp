@@ -983,6 +983,14 @@ bool Sema::isThisOutsideMemberFunctionBody(QualType BaseType) {
   return Class && Class->isBeingDefined();
 }
 
+void emitCustomError(Sema &S, const std::string &str, SourceLocation Loc,
+                     SourceRange SR);
+QualType deduceClassSpecializationTypeFromArguments(
+    Sema &S, QualType AutoClassTemplateTy, ArrayRef<Expr *> Args,
+    SourceLocation Loc, TypeSourceInfo **OutTSI = nullptr);
+const AutoType *getAsDeducibleClassTemplateType(QualType QTy);
+ArrayRef<Expr *> getAsExprArray(Expr *&E);
+
 ExprResult
 Sema::ActOnCXXTypeConstructExpr(ParsedType TypeRep,
                                 SourceLocation LParenLoc,
@@ -1015,8 +1023,19 @@ Sema::BuildCXXTypeConstructExpr(TypeSourceInfo *TInfo,
     return CXXUnresolvedConstructExpr::Create(Context, TInfo, LParenLoc, Exprs,
                                               RParenLoc);
   }
-
   bool ListInitialization = LParenLoc.isInvalid();
+  if (getAsDeducibleClassTemplateType(Ty)) {
+    Expr *ILE = ListInitialization ? cast<InitListExpr>(Exprs[0]) : nullptr;
+    QualType DeducedTy = deduceClassSpecializationTypeFromArguments(
+        *this, Ty,
+        (ILE ? getAsExprArray(ILE) : static_cast<ArrayRef<Expr *> &>(Exprs)),
+        TInfo->getTypeLoc().getLocStart(), &TInfo);
+    if (DeducedTy.isNull())
+      return ExprError();
+    Ty = DeducedTy;
+    //TInfo->overrideType(DeducedTy);
+  }
+
   assert((!ListInitialization || (Exprs.size() == 1 && isa<InitListExpr>(Exprs[0])))
          && "List initialization must have initializer list as expression.");
   SourceRange FullRange = SourceRange(TyBeginLoc,
@@ -1299,7 +1318,8 @@ Sema::BuildCXXNew(SourceRange Range, bool UseGlobal,
   }
 
   // C++11 [dcl.spec.auto]p6. Deduce the type which 'auto' stands in for.
-  if (TypeMayContainAuto && AllocType->isUndeducedType()) {
+  if (TypeMayContainAuto && AllocType->isUndeducedType() &&
+      !getAsDeducibleClassTemplateType(AllocType)) {
     if (initStyle == CXXNewExpr::NoInit || NumInits == 0)
       return ExprError(Diag(StartLoc, diag::err_auto_new_requires_ctor_arg)
                        << AllocType << TypeRange);
@@ -1323,6 +1343,15 @@ Sema::BuildCXXNew(SourceRange Range, bool UseGlobal,
     if (DeducedType.isNull())
       return ExprError();
     AllocType = DeducedType;
+  }
+  if (Initializer && getAsDeducibleClassTemplateType(AllocType)) {
+    QualType ClassSpecDeducedTy = deduceClassSpecializationTypeFromArguments(
+        *this, AllocType, getAsExprArray(Initializer),
+        AllocTypeInfo->getTypeLoc().getBeginLoc(), &AllocTypeInfo);
+
+    if (ClassSpecDeducedTy.isNull())
+      return ExprError();
+    AllocType = ClassSpecDeducedTy;
   }
 
   // Per C++0x [expr.new]p5, the type being constructed may be a

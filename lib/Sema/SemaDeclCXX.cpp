@@ -5755,11 +5755,14 @@ bool SpecialMemberDeletionInfo::shouldDeleteForAllConstMembers() {
 /// deleted, as specified in C++11 [class.ctor]p5, C++11 [class.copy]p11,
 /// C++11 [class.copy]p23, and C++11 [class.dtor]p5.
 bool Sema::ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
-                                     bool Diagnose) {
+                                     bool Diagnose, 
+                            const bool DeclaringConstructorMemberForDeduction) {
+  assert(!DeclaringConstructorMemberForDeduction || isa<CXXConstructorDecl>(MD));
   if (MD->isInvalidDecl())
     return false;
   CXXRecordDecl *RD = MD->getParent();
-  assert(!RD->isDependentType() && "do deletion after instantiation");
+  assert((DeclaringConstructorMemberForDeduction || !RD->isDependentType()) &&
+         "do deletion after instantiation");
   if (!LangOpts.CPlusPlus11 || RD->isInvalidDecl())
     return false;
 
@@ -5847,7 +5850,7 @@ bool Sema::ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
   SpecialMemberDeletionInfo SMI(*this, MD, CSM, Diagnose);
 
   for (auto &BI : RD->bases())
-    if (!BI.isVirtual() &&
+    if (!BI.isVirtual() && !BI.getType()->isDependentType() &&
         SMI.shouldDeleteForBase(&BI))
       return true;
 
@@ -5855,7 +5858,7 @@ bool Sema::ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM,
   // classes, since we are not going to construct them.
   if (!RD->isAbstract() || !SMI.IsConstructor) {
     for (auto &BI : RD->vbases())
-      if (SMI.shouldDeleteForBase(&BI))
+      if (!BI.getType()->isDependentType() && SMI.shouldDeleteForBase(&BI))
         return true;
   }
 
@@ -5910,7 +5913,7 @@ static bool findTrivialSpecialMember(Sema &S, CXXRecordDecl *RD,
       // to that as an example of why there's not a trivial one.
       CXXConstructorDecl *DefCtor = nullptr;
       if (RD->needsImplicitDefaultConstructor())
-        S.DeclareImplicitDefaultConstructor(RD);
+        S.DeclareImplicitDefaultConstructor(RD, /*ForCtorDeduction*/false);
       for (auto *CI : RD->ctors()) {
         if (!CI->isDefaultConstructor())
           continue;
@@ -8888,7 +8891,8 @@ struct DeclaringSpecialMember {
 }
 
 CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
-                                                     CXXRecordDecl *ClassDecl) {
+                                                     CXXRecordDecl *ClassDecl, 
+                                  const bool DeclaringConstructorForDeduction) {
   // C++ [class.ctor]p5:
   //   A default constructor for a class X is a constructor of class X
   //   that can be called without an argument. If there is no
@@ -8935,7 +8939,9 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
   // constructors is easy to compute.
   DefaultCon->setTrivial(ClassDecl->hasTrivialDefaultConstructor());
 
-  if (ShouldDeleteSpecialMember(DefaultCon, CXXDefaultConstructor))
+  if (ShouldDeleteSpecialMember(DefaultCon, CXXDefaultConstructor,
+                                /*Diagnose*/false,
+                                DeclaringConstructorForDeduction))
     SetDeclDeleted(DefaultCon, ClassLoc);
 
   // Note that we have declared this constructor.
@@ -8943,7 +8949,8 @@ CXXConstructorDecl *Sema::DeclareImplicitDefaultConstructor(
 
   if (Scope *S = getScopeForContext(ClassDecl))
     PushOnScopeChains(DefaultCon, S, false);
-  ClassDecl->addDecl(DefaultCon);
+  if (!DeclaringConstructorForDeduction)
+    ClassDecl->addDecl(DefaultCon);
 
   return DefaultCon;
 }
@@ -10877,7 +10884,8 @@ Sema::ComputeDefaultedCopyCtorExceptionSpec(CXXMethodDecl *MD) {
 }
 
 CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
-                                                    CXXRecordDecl *ClassDecl) {
+                                                    CXXRecordDecl *ClassDecl,
+                                  const bool DeclaringConstructorForDeduction) {
   // C++ [class.copy]p4:
   //   If the class definition does not explicitly declare a copy
   //   constructor, one is declared implicitly.
@@ -10889,6 +10897,11 @@ CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
 
   QualType ClassType = Context.getTypeDeclType(ClassDecl);
   QualType ArgType = ClassType;
+  // Get to the TST so that it is substituted properly during transformation.
+  if (DeclaringConstructorForDeduction)
+    ArgType = ClassType->getAs<InjectedClassNameType>()
+                  ->getInjectedSpecializationType();
+
   bool Const = ClassDecl->implicitCopyConstructorHasConstParam();
   if (Const)
     ArgType = ArgType.withConst();
@@ -10939,7 +10952,9 @@ CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
       ? SpecialMemberIsTrivial(CopyConstructor, CXXCopyConstructor)
       : ClassDecl->hasTrivialCopyConstructor());
 
-  if (ShouldDeleteSpecialMember(CopyConstructor, CXXCopyConstructor))
+  if (ShouldDeleteSpecialMember(CopyConstructor, CXXCopyConstructor,
+                                /*Diagnose*/ false,
+                                DeclaringConstructorForDeduction))
     SetDeclDeleted(CopyConstructor, ClassLoc);
 
   // Note that we have declared this constructor.
@@ -10947,7 +10962,8 @@ CXXConstructorDecl *Sema::DeclareImplicitCopyConstructor(
 
   if (Scope *S = getScopeForContext(ClassDecl))
     PushOnScopeChains(CopyConstructor, S, false);
-  ClassDecl->addDecl(CopyConstructor);
+  if (!DeclaringConstructorForDeduction)
+    ClassDecl->addDecl(CopyConstructor);
 
   return CopyConstructor;
 }
@@ -11060,7 +11076,8 @@ Sema::ComputeDefaultedMoveCtorExceptionSpec(CXXMethodDecl *MD) {
 }
 
 CXXConstructorDecl *Sema::DeclareImplicitMoveConstructor(
-                                                    CXXRecordDecl *ClassDecl) {
+                                                    CXXRecordDecl *ClassDecl, 
+                                  const bool DeclaringConstructorForDeduction) {
   assert(ClassDecl->needsImplicitMoveConstructor());
 
   DeclaringSpecialMember DSM(*this, ClassDecl, CXXMoveConstructor);
@@ -11068,6 +11085,10 @@ CXXConstructorDecl *Sema::DeclareImplicitMoveConstructor(
     return nullptr;
 
   QualType ClassType = Context.getTypeDeclType(ClassDecl);
+  if (DeclaringConstructorForDeduction) {
+    ClassType = ClassType->getAs<InjectedClassNameType>()
+                    ->getInjectedSpecializationType();
+  }
   QualType ArgType = Context.getRValueReferenceType(ClassType);
 
   bool Constexpr = defaultedSpecialMemberIsConstexpr(*this, ClassDecl,
@@ -11116,7 +11137,9 @@ CXXConstructorDecl *Sema::DeclareImplicitMoveConstructor(
       ? SpecialMemberIsTrivial(MoveConstructor, CXXMoveConstructor)
       : ClassDecl->hasTrivialMoveConstructor());
 
-  if (ShouldDeleteSpecialMember(MoveConstructor, CXXMoveConstructor)) {
+  if (ShouldDeleteSpecialMember(MoveConstructor, CXXMoveConstructor,
+                                /*Diagnose*/ false,
+                                DeclaringConstructorForDeduction)) {
     ClassDecl->setImplicitMoveConstructorIsDeleted();
     SetDeclDeleted(MoveConstructor, ClassLoc);
   }
@@ -11126,7 +11149,9 @@ CXXConstructorDecl *Sema::DeclareImplicitMoveConstructor(
 
   if (Scope *S = getScopeForContext(ClassDecl))
     PushOnScopeChains(MoveConstructor, S, false);
-  ClassDecl->addDecl(MoveConstructor);
+  
+  if (!DeclaringConstructorForDeduction)
+    ClassDecl->addDecl(MoveConstructor);
 
   return MoveConstructor;
 }
@@ -12752,7 +12777,14 @@ NamedDecl *Sema::ActOnFriendFunctionDecl(Scope *S, Declarator &D,
   if (!ND) return nullptr;
 
   assert(ND->getLexicalDeclContext() == CurContext);
-
+  if (auto *FTD = dyn_cast<FunctionTemplateDecl>(ND))
+    if (FTD->isClassTemplateDeducer()) {
+      void emitCustomError(Sema & S, const std::string &str, SourceLocation Loc,
+                           SourceRange SR);
+      emitCustomError(*this, "class template deducer can not be a friend",
+                      ND->getLocation(), ND->getSourceRange());
+      return nullptr;
+    }
   // If we performed typo correction, we might have added a scope specifier
   // and changed the decl context.
   DC = ND->getDeclContext();

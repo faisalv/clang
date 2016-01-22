@@ -37,6 +37,52 @@
 
 using namespace clang;
 
+
+void emitCustomError(Sema &S, const std::string &str, SourceLocation Loc,
+                     SourceRange SR) {
+  DiagnosticsEngine &Diags = S.getDiagnostics();
+  unsigned DiagID = Diags.getDiagnosticIDs()->getCustomDiagID(
+      (DiagnosticIDs::Level)DiagnosticsEngine::Error, StringRef(str.c_str()));
+  //Diags.Report(Loc, DiagID) << SR;
+  S.Diag(Loc, DiagID) << SR;
+}
+
+const AutoType *getAsDeducibleClassTemplateType(const QualType Ty) {
+  QualType QTy = Ty;
+  while (const ParenType *P = QTy->getAs<ParenType>())
+    QTy = P->getInnerType();
+  
+  if (auto *AT = QTy->getAs<AutoType>())
+    return AT->isTemplateAuto()
+               ? AT
+               : nullptr;
+
+  if (auto *ET = QTy->getAs<ElaboratedType>())
+    if (auto *AT = ET->getNamedType()->getAs<AutoType>())
+      return AT->isTemplateAuto()
+                 ? AT
+                 : nullptr;
+  return nullptr;
+}
+bool hasPackAsLastTemplateParameter(const AutoType *T) {
+  assert(T->getTemplateDecl() && "should only be called on a deducible tempalte type");
+  auto *TPL = T->getTemplateDecl()->getTemplateParameters();
+  assert(TPL->size());
+  return TPL->getParam(TPL->size() - 1)->isTemplateParameterPack();
+}
+
+QualType checkCompleteTemplateIdType(Sema &S, const AutoType *T,
+                                     SourceLocation TemplateNameLoc) {
+  assert(T->getTemplateDecl());
+  if (T->getExplicitArgs()/* && hasPackAsLastTemplateParameter(T)*/) {
+    TemplateArgumentListInfo ExplicitArgs;
+    T->getExplicitArgs()->copyInto(ExplicitArgs);
+    return S.CheckTemplateIdType(TemplateName(T->getTemplateDecl()),
+                                 TemplateNameLoc, ExplicitArgs);
+  }
+  return QualType();
+}
+
 enum TypeDiagSelector {
   TDS_Function,
   TDS_Pointer,
@@ -2634,7 +2680,7 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
 
   if (D.getAttributes())
     distributeTypeAttrsFromDeclarator(state, T);
-
+ 
   // C++11 [dcl.spec.auto]p5: reject 'auto' if it is not in an allowed context.
   if (D.getDeclSpec().containsPlaceholderType()) {
     int Error = -1;
@@ -2828,7 +2874,56 @@ static QualType GetDeclSpecTypeForDeclarator(TypeProcessingState &state,
       D.setInvalidType(true);
     }
   }
+  // Check the type template deducible type to see whether it can be used in
+  // this context. If it can not, then just try and complete the template-id
+  // and emit the error message if it is a partial template id, but if it is
+  // a variadic template, then lock it in.
+  if (const AutoType *AT = getAsDeducibleClassTemplateType(T)) {
+    switch (D.getContext()) {
+    case Declarator::FileContext:
+    case Declarator::BlockContext:
+    case Declarator::ForContext:
+    case Declarator::CXXNewContext:
+    case Declarator::ConditionContext:
+    case Declarator::TypeNameContext:
+      // typedefs must have complete template-ids
+      if (D.getDeclSpec().getStorageClassSpec() != DeclSpec::SCS_typedef)
+        break; 
 
+    case Declarator::TrailingReturnContext:
+    case Declarator::MemberContext:      
+    case Declarator::BlockLiteralContext:
+    case Declarator::LambdaExprContext:      
+    case Declarator::AliasDeclContext:
+    case Declarator::AliasTemplateContext:
+    case Declarator::ConversionIdContext:
+    case Declarator::TemplateParamContext:
+    case Declarator::CXXCatchContext:
+    case Declarator::ObjCCatchContext:
+    case Declarator::TemplateTypeArgContext:
+    case Declarator::PrototypeContext:
+    case Declarator::LambdaExprParameterContext:
+    case Declarator::ObjCParameterContext:
+    case Declarator::ObjCResultContext:
+    case Declarator::KNRTypeListContext:
+      DiagnosticErrorTrap ErrorTrap(SemaRef.getDiagnostics());
+      QualType TemplateIdTy = checkCompleteTemplateIdType(
+          SemaRef, AT, D.getDeclSpec().getLocStart());
+
+      if (TemplateIdTy.isNull()) {
+        if (!ErrorTrap.hasErrorOccurred()) {
+          emitCustomError(SemaRef, "missing template arguments - invalid "
+                                   "context for type template deducible type",
+                          D.getDeclSpec().getLocStart(),
+                          D.getDeclSpec().getSourceRange());
+        }
+        D.setInvalidType(true);
+        break;
+      }
+      TemplateIdTy.setLocalFastQualifiers(T.getLocalFastQualifiers());
+      T = TemplateIdTy;
+    }
+  }
   assert(!T.isNull() && "This function should not return a null type");
   return T;
 }
@@ -3340,6 +3435,48 @@ static TypeSourceInfo *GetFullTypeForDeclarator(TypeProcessingState &state,
 
         S.Diag(DeclChunk.Loc, DiagId) << DiagKind;
         D.setInvalidType(true);
+        break;
+      }
+    }
+  }
+  // Check to see if we have tempalte type deducible type, and if so and we are
+  // declaring a pointer, ref, array or function, attempt to form a complete
+  // tempalte-id if we have explicit args. If we have a variadic template
+  // parameter for our class template, then this would be valid, otherwise it
+  // won't be, and we'll get a too few template argument error.
+  if (const AutoType *AT = getAsDeducibleClassTemplateType(T)) {
+    for (unsigned I = 0, E = D.getNumTypeObjects(); I != E; ++I) {
+      unsigned Index = E - I - 1;
+      DeclaratorChunk &DeclChunk = D.getTypeObject(Index);
+     
+      switch (DeclChunk.Kind) {
+      
+      case DeclaratorChunk::Paren:
+        continue;
+      case DeclaratorChunk::Function:        
+      case DeclaratorChunk::Pointer:
+      case DeclaratorChunk::BlockPointer:
+      case DeclaratorChunk::MemberPointer:
+      case DeclaratorChunk::Reference:
+      case DeclaratorChunk::Array:
+        std::string msg;
+        QualType ValidTemplateIdType;
+        DiagnosticErrorTrap ErrorTrap(S.getDiagnostics());
+        if (AT->getExplicitArgs()) {
+          ValidTemplateIdType =
+              checkCompleteTemplateIdType(S, AT, D.getDeclSpec().getLocStart());
+        }
+        if (ValidTemplateIdType.isNull()) {
+          if (!ErrorTrap.hasErrorOccurred()) {
+            emitCustomError(S, "invalid type specifier missing template arguments, can not deduce "
+                             "template arguments for this declarator",
+                          DeclChunk.Loc, D.getDeclSpec().getSourceRange());
+          }
+          D.setInvalidType(true);
+        } else {
+          ValidTemplateIdType.setLocalFastQualifiers(T.getLocalFastQualifiers());
+          T = ValidTemplateIdType;
+        }
         break;
       }
     }
@@ -7009,8 +7146,20 @@ QualType Sema::BuildDecltypeType(Expr *E, SourceLocation Loc,
     // context, so side effects could result in unintended consequences.
     Diag(E->getExprLoc(), diag::warn_side_effects_unevaluated_context);
   }
-
-  return Context.getDecltypeType(E, getDecltypeForExpr(*this, E));
+  // We always rebuild the type as a non-dependent decltype if a class template
+  // deducer is undergoing subsitution, since expression nodes can incorrectly
+  // be labeled as instantiation dependent when they would not turn out to be
+  // (thishappens as a consequence of such nodes being contained in what is
+  // perceived as a dependent context, but during class template deduction and
+  // substitiution into deducers - if it`s not type dependent, it shouldn't be
+  // otherwise dependent - else it fails to check for argument type
+  // appropriateness during call resolution.
+  //extern FunctionTemplateDecl *isClassTemplateDeducerUndergoingSubstitution(
+  //    Sema &);
+  return Context.getDecltypeType(
+      E, getDecltypeForExpr(*this, E));
+    //  !E->isTypeDependent() &&
+    //      isClassTemplateDeducerUndergoingSubstitution(*this));
 }
 
 QualType Sema::BuildUnaryTransformType(QualType BaseType,

@@ -230,6 +230,46 @@ static ParsedType recoverFromTypeInKnownDependentBase(Sema &S,
   return S.CreateParsedType(T, Builder.getTypeSourceInfo(Context, T));
 }
 
+ParsedType getTemplateDeducibleType(Sema &S, TemplateDecl *IIDecl,
+                                    CXXScopeSpec *SS,
+                                    bool WantNontrivialTypeSourceInfo,
+                                    SourceLocation NameLoc,
+                                    ASTTemplateArgumentListInfo *ExplicitArgs) {
+  auto &Context = S.Context;
+  QualType T;
+  if (!IIDecl)
+    return ParsedType();
+  if (auto *CTD = dyn_cast<ClassTemplateDecl>(IIDecl)) {
+    T = Context.getAutoTemplateType(TemplateName(CTD), S.CurContext->isDependentContext(),
+                                        ExplicitArgs);
+  } else if (auto *TTD = dyn_cast<TemplateTemplateParmDecl>(IIDecl)) {
+    // assert(CurContext->isDependentContext()); - could be in a variable
+    // template
+    T = Context.getAutoTemplateType(TemplateName(TTD), true, ExplicitArgs);
+  } else if (auto *TATD = dyn_cast<TypeAliasTemplateDecl>(IIDecl)) {
+    T = Context.getAutoTemplateType(
+        TemplateName(TATD), S.CurContext->isDependentContext(), ExplicitArgs);
+  }
+
+  if (!T.isNull() && SS && SS->isNotEmpty()) {
+    if (WantNontrivialTypeSourceInfo) {
+      // Construct a type with type-source information.
+      TypeLocBuilder Builder;
+      Builder.pushTypeSpec(T).setNameLoc(NameLoc);
+
+      T = S.getElaboratedType(ETK_None, *SS, T);
+      ElaboratedTypeLoc ElabTL = Builder.push<ElaboratedTypeLoc>(T);
+      ElabTL.setElaboratedKeywordLoc(SourceLocation());
+      ElabTL.setQualifierLoc(SS->getWithLocInContext(Context));
+      return S.CreateParsedType(T, Builder.getTypeSourceInfo(Context, T));
+    } else
+      T = S.getElaboratedType(ETK_None, *SS, T);
+  }
+  if (T.isNull())
+    return ParsedType();
+  return ParsedType::make(T);
+}
+
 /// \brief If the identifier refers to a type name within this scope,
 /// return the declaration of that type.
 ///
@@ -244,7 +284,8 @@ ParsedType Sema::getTypeName(const IdentifierInfo &II, SourceLocation NameLoc,
                              ParsedType ObjectTypePtr,
                              bool IsCtorOrDtorName,
                              bool WantNontrivialTypeSourceInfo,
-                             IdentifierInfo **CorrectedII) {
+                             IdentifierInfo **CorrectedII,
+                             const bool ConvertClassTemplateToType) {
   // Determine where we will perform name lookup.
   DeclContext *LookupCtx = nullptr;
   if (ObjectTypePtr) {
@@ -444,6 +485,11 @@ ParsedType Sema::getTypeName(const IdentifierInfo &II, SourceLocation NameLoc,
     (void)DiagnoseUseOfDecl(IDecl, NameLoc);
     if (!HasTrailingDot)
       T = Context.getObjCInterfaceType(IDecl);
+  } else if (ConvertClassTemplateToType) {
+    if (ParsedType PTy = getTemplateDeducibleType(
+            *this, dyn_cast<TemplateDecl>(IIDecl), SS,
+            WantNontrivialTypeSourceInfo, NameLoc, nullptr))
+      return PTy;
   }
 
   if (T.isNull()) {
@@ -5006,6 +5052,10 @@ NamedDecl *Sema::HandleDeclarator(Scope *S, Declarator &D,
     PushOnScopeChains(New, S, AddToContext);
     if (!AddToContext)
       CurContext->addHiddenDecl(New);
+  } else if (auto *FTD = dyn_cast<FunctionTemplateDecl>(New)) {
+    if (FTD->isClassTemplateDeducer() && !D.isRedeclaration())
+      Context.addClassTemplateDeducer(
+          FTD->getDeducibleClassTemplate()->getCanonicalDecl(), FTD);
   }
 
   return New;
@@ -8127,7 +8177,18 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
              D.getCXXScopeSpec().getScopeRep()->isDependent() ||
              CurContext->isDependentContext())) {
           // ignore these
-        } else {
+        } else if (NewFD->getDescribedFunctionTemplate() &&
+                   NewFD->getDescribedFunctionTemplate()
+                       ->isClassTemplateDeducer()) {
+          // ignore these - they look like they are adding members to a class or
+          // a namespace but they do not.
+
+          // template<class T> struct B { template<class U> struct C; };
+          // 
+          // template<class T> template<class U> B<T>::C<U*> B<T>::C(U); //OK
+          //
+        }
+        else {
           // The user tried to provide an out-of-line definition for a
           // function that is a member of a class or namespace, but there
           // was no such member function declared (C++ [class.mfct]p2,
@@ -8304,23 +8365,123 @@ Sema::ActOnFunctionDeclarator(Scope *S, Declarator &D, DeclContext *DC,
   return NewFD;
 }
 
+void emitCustomError(Sema &S, const std::string &str, SourceLocation Loc,
+                     SourceRange SR);
+
+bool
+checkClassTemplateDeducerDeclaration(Sema &S,
+                                     FunctionTemplateDecl *DeducerTemplate,
+                                     const ClassTemplateDecl *ClassTemplate) {
+  bool NotOK = true;
+
+  FunctionDecl *DeducerFD = DeducerTemplate->getTemplatedDecl();
+  QualType RetTy = S.Context.getCanonicalType(DeducerFD->getReturnType());
+  // Make sure it isn't constexpr, const, extern etc...
+  if (DeducerFD->isConstexpr()) {
+    emitCustomError(S, "a class template deducer must not be constexpr",
+                    DeducerFD->getLocation(), DeducerFD->getSourceRange());
+    goto end_check;
+  }
+  if (DeducerFD->getStorageClass()) {
+    emitCustomError(
+        S, "a class template deducer must not be marked static or extern",
+        DeducerFD->getLocation(), DeducerFD->getSourceRange());
+    goto end_check;
+  }
+  if (DeducerFD->isInlineSpecified()) {
+    emitCustomError(S, "a class template deducer must not be marked inline",
+                    DeducerFD->getLocation(), DeducerFD->getSourceRange());
+    goto end_check;
+  }
+  if (DeducerFD->getType()->getAs<FunctionProtoType>()->hasExceptionSpec()) {
+    emitCustomError(
+        S, "a class template deducer must not have an exception specification",
+        DeducerFD->getLocation(), DeducerFD->getSourceRange());
+    goto end_check;
+  }
+  const ClassTemplateSpecializationDecl *SpecDecl =
+      dyn_cast_or_null<ClassTemplateSpecializationDecl>(
+          RetTy->getAsCXXRecordDecl());
+  const TemplateSpecializationType *TST =
+      SpecDecl ? nullptr : RetTy->getAs<TemplateSpecializationType>();
+  if (SpecDecl || TST) {
+    TemplateDecl *TD = TST ? TST->getTemplateName().getAsTemplateDecl()
+                           : SpecDecl->getSpecializedTemplate();
+    ClassTemplateDecl *RetCTD = nullptr;
+    if (!TD || !(RetCTD = dyn_cast<ClassTemplateDecl>(TD)) ||
+        RetCTD->getCanonicalDecl() != ClassTemplate->getCanonicalDecl()) {
+      emitCustomError(S, "the return type of a class template deducer must be "
+                         "a template id referring to the class template itself",
+                      DeducerFD->getLocation(),
+                      DeducerFD->getReturnTypeSourceRange());
+
+    } else {
+      if (auto *Method = dyn_cast<CXXMethodDecl>(DeducerFD)) {
+        // This is a method decl, which means this was declared at class scope
+        // for a member class template.  We will convert this to a function decl
+        // to avoid confusing overload resolution. The alternative is to teach
+        // overload resolution to special case a class template deducer that is
+        // a CXXMethodDecl.
+        if (Method->isConst() || Method->isVolatile()) {
+          emitCustomError(
+              S, "a class template deducer can not have cv-qualifiers",
+              DeducerFD->getLocation(), DeducerFD->getSourceRange());
+          goto end_check;
+        }
+        if (Method->getRefQualifier()) {
+          emitCustomError(
+              S, "a class template deducer must not have ref qualifiers",
+              DeducerFD->getLocation(), DeducerFD->getSourceRange());
+          goto end_check;
+        }
+        
+        auto *ReplacementFD = FunctionDecl::Create(
+            S.Context, Method->getDeclContext(), Method->getLocStart(),
+            Method->getNameInfo(), Method->getType(),
+            Method->getTypeSourceInfo(), Method->getStorageClass(),
+            Method->isInlineSpecified(), Method->hasWrittenPrototype(),
+            Method->isConstexpr());
+        ReplacementFD->setParams(Method->parameters());
+        ReplacementFD->setDescribedFunctionTemplate(DeducerTemplate);
+        DeducerTemplate->resetTemplatedDecl(ReplacementFD);
+        ReplacementFD->setLexicalDeclContext(Method->getLexicalDeclContext());
+        NotOK = false;
+      } else
+        NotOK = false;
+    }
+  }
+  /*else if (const DependentTemplateSpecializationType *DTST =
+                 RetTy->getAs<DependentTemplateSpecializationType>()) {
+
+  } */
+  else {
+    emitCustomError(
+        S, "the return type of a class template deducer must be a template id",
+        DeducerFD->getLocation(), DeducerFD->getReturnTypeSourceRange());
+  }
+end_check:
+  if (NotOK) {
+    DeducerFD->setInvalidDecl();
+    DeducerTemplate->setInvalidDecl();
+  }
+  return NotOK;
+}
 /// \brief Perform semantic checking of a new function declaration.
 ///
-/// Performs semantic analysis of the new function declaration
-/// NewFD. This routine performs all semantic checking that does not
-/// require the actual declarator involved in the declaration, and is
-/// used both for the declaration of functions as they are parsed
-/// (called via ActOnDeclarator) and for the declaration of functions
-/// that have been instantiated via C++ template instantiation (called
-/// via InstantiateDecl).
+/// Performs semantic analysis of the new function declaration NewFD. This
+/// routine performs all semantic checking that does not require the actual
+/// declarator involved in the declaration, and is used both for the declaration
+/// of functions as they are parsed (called via ActOnDeclarator) and for the
+/// declaration of functions that have been instantiated via C++ template
+/// instantiation (called via InstantiateDecl).
 ///
-/// \param IsExplicitSpecialization whether this new function declaration is
-/// an explicit specialization of the previous declaration.
+/// \param IsExplicitSpecialization whether this new function declaration is an
+/// explicit specialization of the previous declaration.
 ///
 /// This sets NewFD->isInvalidDecl() to true if there was an error.
 ///
 /// \returns true if the function declaration is a redeclaration.
-bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
+bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *&NewFD,
                                     LookupResult &Previous,
                                     bool IsExplicitSpecialization) {
   assert(!NewFD->getReturnType()->isVariablyModifiedType() &&
@@ -8334,7 +8495,6 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
 
   bool Redeclaration = false;
   NamedDecl *OldDecl = nullptr;
-
   // Merge or overload the declaration with an existing declaration of
   // the same name, if appropriate.
   if (!Previous.empty()) {
@@ -8349,15 +8509,58 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
         OldDecl = Candidate;
       }
     } else {
+retry_overload_check:
       switch (CheckOverload(S, NewFD, Previous, OldDecl,
                             /*NewIsUsingDecl*/ false)) {
       case Ovl_Match:
         Redeclaration = true;
         break;
 
-      case Ovl_NonFunction:
+      case Ovl_NonFunction: {
         Redeclaration = true;
+        // We found a non-function with the same name as this function, so check
+        // if it is the name of a class template, and if it is, then we must be
+        // declaring a class template deducer.  So retrieve the already declared
+        // class template deducers, and replace the Previous lookup with them,
+        // so that we can check amongst them whether this is a redeclaration
+        // etc.  Also perform our semantic checks on the deducer.
+        if (ClassTemplateDecl *CurCTD = dyn_cast<ClassTemplateDecl>(OldDecl)) {
+          if (CurCTD->getDeclContext()->getPrimaryContext() ==
+                  NewFD->getDeclContext()->getPrimaryContext() &&
+              NewFD->getDeclName().isIdentifier() &&
+              NewFD->getDescribedFunctionTemplate()) {
+            FunctionTemplateDecl *DeducerTemplate =
+                NewFD->getDescribedFunctionTemplate();
+            // Add this class's deducers to the Previous lookup result.
+            Previous.clear();
+            for (FunctionTemplateDecl *FTD :
+                 Context.getClassTemplateDeducers(CurCTD->getCanonicalDecl())) {
+              Previous.addDecl(FTD);
+            }
+
+            // A deducer does not have a name, so remove it from this declaration.
+            NewFD->setDeclName(DeclarationName());
+            DeducerTemplate->setDeclName(DeclarationName());
+
+            if (!checkClassTemplateDeducerDeclaration(*this, DeducerTemplate,
+                                                      CurCTD)) {
+              NewFD = DeducerTemplate->getTemplatedDecl();
+              DeducerTemplate->setDeducibleClassTemplate(CurCTD);
+            }
+
+            if (Previous.empty()) {
+              Redeclaration = false;
+              OldDecl = nullptr;
+            } else {
+              OldDecl = nullptr;
+              Previous.resolveKind();
+              goto retry_overload_check;
+            }
+          }
+        }
+
         break;
+      }
 
       case Ovl_Overload:
         Redeclaration = false;
@@ -8454,7 +8657,7 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
       NewFD->setInvalidDecl();
       return Redeclaration;
     }
-
+    
     Previous.clear();
     Previous.addDecl(OldDecl);
 
@@ -8517,7 +8720,8 @@ bool Sema::CheckFunctionDeclaration(Scope *S, FunctionDecl *NewFD,
 
     // Find any virtual functions that this function overrides.
     if (CXXMethodDecl *Method = dyn_cast<CXXMethodDecl>(NewFD)) {
-      if (!Method->isFunctionTemplateSpecialization() && 
+      if (!isa<CXXConstructorDecl>(Method) &&
+          !Method->isFunctionTemplateSpecialization() &&
           !Method->getDescribedFunctionTemplate() &&
           Method->isCanonicalDecl()) {
         if (AddOverriddenMethods(Method->getParent(), Method)) {
@@ -9188,6 +9392,962 @@ QualType Sema::deduceVarTypeFromInitializer(VarDecl *VDecl,
   return DeducedType;
 }
 
+Sema::TemplateDeductionResult DeduceTemplateArgumentsByTypeMatch(
+    Sema &S, TemplateParameterList *TemplateParams, QualType Param,
+    QualType Arg, TemplateDeductionInfo &Info,
+    SmallVectorImpl<DeducedTemplateArgument> &Deduced, unsigned TDF,
+    bool PartialOrdering = false);
+
+FunctionTemplateDecl *transformTemplateParameterDepthAndPosition(
+    Sema &S, FunctionTemplateDecl *CtorTmpl, DeclContext *DeclContainer,
+    const int DepthAdj, const int PosAdj, TemplateParameterList *ClassTPL);
+
+const AutoType *getAsDeducibleClassTemplateType(QualType QTy);
+
+// DeclaredConstructors - contains all the constructors ClassTPL - the template
+// parameter list for the class returns a vector that contains all the
+// synthesized decls
+static std::vector<const FunctionTemplateDecl *>
+synthesizeFunctionTemplateForEachConstructor(Sema &S,
+    const std::vector<const CXXConstructorDecl *> &DeclaredConstructors,
+    TemplateParameterList *ClassTPL, DeclContext *const DeclContainer) {
+  std::vector<const FunctionTemplateDecl *> CtorFuns;
+  if (!DeclaredConstructors.size())
+    return CtorFuns;
+
+  ASTContext &Context = DeclaredConstructors.front()->getASTContext();
+  FunctionTemplateDecl *InventedFTD = nullptr;
+  for (const CXXConstructorDecl *C : DeclaredConstructors) {
+    if (const FunctionTemplateDecl *CtorTemplate =
+            C->getDescribedFunctionTemplate()) {
+
+      // We have a constructor that is a member template and has its own
+      // template parameters. In order to create a surrogate deducer template,
+      // prepend the template parameters of the class to the tpl of the ctor and
+      // then adjust the depth of all the ctor's template parameters and
+      // position. 
+
+      // We must remove one from the depth, and add to the position the number
+      // of parameters decls.
+      InventedFTD = transformTemplateParameterDepthAndPosition(
+          S, const_cast<FunctionTemplateDecl *>(CtorTemplate), DeclContainer,
+          -1, ClassTPL->size(), ClassTPL);
+
+    } else {
+      
+      assert(C->getTypeSourceInfo());
+      
+      FunctionDecl *FD = FunctionDecl::Create(
+          Context, DeclContainer, C->getLocStart(),
+          C->getNameInfo(), C->getType(), C->getTypeSourceInfo(), SC_None,
+          /*IsInlineSpecified*/ true, /*hasWrittenPrototype*/ false);
+      FunctionTemplateDecl *FTD = FunctionTemplateDecl::Create(
+          Context, DeclContainer, C->getLocStart(),
+          C->getNameInfo().getName(), ClassTPL, FD);
+      FD->setImplicit();
+      FTD->setImplicit();
+      FD->setParams(C->parameters());
+      FD->setDescribedFunctionTemplate(FTD);
+      InventedFTD = FTD; 
+    }
+    CtorFuns.push_back(InventedFTD);
+  }
+  return CtorFuns;
+}
+void declareImplicitConstructors(
+    Sema &S, CXXRecordDecl *TemplatedDecl,
+    const MultiLevelTemplateArgumentList *TemplateArgsPtr,
+    SourceLocation PointOfInstantiation) {
+  
+  CXXConstructorDecl *ImplicitCtors[3] = {nullptr, nullptr, nullptr};
+  CXXConstructorDecl *&ImplicitDefaultCtor = ImplicitCtors[0];
+  CXXConstructorDecl *&ImplicitCopyCtor = ImplicitCtors[1];
+  CXXConstructorDecl *&ImplicitMoveCtor = ImplicitCtors[2];
+  const bool IsDefined = TemplatedDecl->hasDefinition();
+  if (IsDefined && TemplatedDecl->needsImplicitDefaultConstructor()) {
+    CXXConstructorDecl *C = S.DeclareImplicitDefaultConstructor(TemplatedDecl,
+                                        /*ForCtorDeduction*/ true);
+    assert(C);
+    assert(!C->getTypeSourceInfo());
+    C->setTypeSourceInfo(
+        S.Context.getTrivialTypeSourceInfo(C->getType(), C->getLocStart()));
+    // While creating a constructor for deduction, it does not get added to the
+    // parent class - so explicitly add it to the declared constructors vec.
+    ImplicitDefaultCtor = C;
+  }
+  auto GenerateAndSetTypeSourceInfo = [](CXXConstructorDecl *C, ASTContext &Ctx) {
+    TypeSourceInfo *CtorTSI =
+        Ctx.getTrivialTypeSourceInfo(C->getType(), C->getLocStart());
+    FunctionProtoTypeLoc FTL = CtorTSI->getTypeLoc().getAs<FunctionProtoTypeLoc>();
+    assert(FTL);
+    assert(FTL.getNumParams() == 1 && "Implicit copy ctor should have one param!");
+    assert(!FTL.getParam(0));
+    ParmVarDecl *P = C->getParamDecl(0); 
+    assert(!P->getTypeSourceInfo());  
+    TypeSourceInfo *ParmTSI = Ctx.getTrivialTypeSourceInfo(
+        P->getType(), P->getLocStart());
+    P->setTypeSourceInfo(ParmTSI);
+    FTL.setParam(0, P);
+    C->setTypeSourceInfo(CtorTSI);
+  };
+  if (IsDefined && TemplatedDecl->needsImplicitCopyConstructor()) {
+    CXXConstructorDecl *C = S.DeclareImplicitCopyConstructor(TemplatedDecl,
+                                        /*ForCtorDeduction*/ true);
+    GenerateAndSetTypeSourceInfo(C, S.Context);
+    ImplicitCopyCtor = C;
+  }
+  if (IsDefined && TemplatedDecl->needsImplicitMoveConstructor()) {
+    CXXConstructorDecl *C = S.DeclareImplicitMoveConstructor(TemplatedDecl,
+                                        /*ForCtorDeduction*/ true);
+    GenerateAndSetTypeSourceInfo(C, S.Context);
+    ImplicitMoveCtor = C;
+  }
+  DeclContext *Owner = TemplatedDecl;
+  // While creating a constructor for deduction, it does not get added to the
+  // parent class - so explicitly add it to the declared constructors vec.
+  for (CXXConstructorDecl *C : ImplicitCtors) {
+    if (C && TemplateArgsPtr) {
+      Sema::InstantiatingTemplate Inst(S, PointOfInstantiation, C);
+      if (Inst.isInvalid()) return;
+      Sema::ContextRAII EnterCtx(S, Owner);
+      C = cast_or_null<CXXConstructorDecl>(
+          S.SubstDecl(C, Owner, *TemplateArgsPtr));
+    } else if (C) {
+      TemplatedDecl->addDecl(C);
+    }
+  }
+}
+// Go through each decl within the class - even the templates (which ctors()
+// don't return)
+static std::vector<const CXXConstructorDecl *>
+collectAllConstructors(Sema &S, CXXRecordDecl *TemplatedDecl) {
+  std::vector<const CXXConstructorDecl *> DeclaredConstructors;
+  if (!TemplatedDecl->isCompleteDefinition())
+    return DeclaredConstructors;
+  for (auto *const D : TemplatedDecl->decls()) {
+    // Synthesize a function template to deduce against...
+    CXXConstructorDecl *C = dyn_cast<CXXConstructorDecl>(D);
+    if (!C && isa<FunctionTemplateDecl>(D)) {
+      auto *FTD = cast<FunctionTemplateDecl>(D);
+      C = dyn_cast<CXXConstructorDecl>(FTD->getTemplatedDecl());
+    }
+    if (C)
+      DeclaredConstructors.push_back(C);
+  }
+  return DeclaredConstructors;
+}
+
+void addTrivialLocationInfoToTemplateArguments(
+    Sema &S, const TemplateArgumentList *TAL,
+    const unsigned NumTemplateArgsToUse, const TemplateParameterList *ClassTPL,
+    SourceLocation LocToUseForAllLocs, TemplateArgumentListInfo &TALI) {
+  for (size_t I = 0; I < NumTemplateArgsToUse; ++I) {
+    const TemplateArgument &TA = TAL->get(I);
+    const NamedDecl *const CorrespondingDecl = ClassTPL->getParam(I);
+
+    extern TemplateArgumentLoc getTrivialTemplateArgumentLoc(
+        Sema & S, const TemplateArgument &Arg, QualType NTTPType,
+        SourceLocation Loc);
+    // If the argument is of kind declaration or nullptr, we have a non-type
+    // template argument of reference or pointer type, so get its type.
+    QualType NTTPType =
+        (TA.getKind() == TA.Declaration || TA.getKind() == TA.NullPtr)
+            ? cast<NonTypeTemplateParmDecl>(CorrespondingDecl)->getType()
+            : QualType();
+    
+    // Unpack pack expansions.
+    
+    if (TA.getKind() == TA.Pack) {
+      // FVQUESTION: Does this need to recurse??
+      for (const TemplateArgument &UnpackedArg : TA.getPackAsArray())
+        TALI.addArgument(getTrivialTemplateArgumentLoc(S, UnpackedArg, NTTPType,
+                                                       LocToUseForAllLocs));
+    } else {
+
+      TemplateArgumentLoc TALoc =
+        getTrivialTemplateArgumentLoc(S, TA, NTTPType, LocToUseForAllLocs);
+      TALI.addArgument(TALoc);
+    }
+  }
+}
+
+// This converts an intializer expression to its individual subexpressions
+// wrapped in an arrayref.
+ArrayRef<Expr *> getAsExprArray(Expr *&E) {
+  if (auto *PLE = dyn_cast<ParenListExpr>(E))
+    return PLE->exprs();
+  if (auto *ILE = dyn_cast<InitListExpr>(E)) 
+    return ILE->inits();
+  return ArrayRef<Expr *>(E);
+}
+QualType getCanonicalTypeFromTemplateAlias(const TypeAliasTemplateDecl *T) {
+  auto &Ctx = T->getASTContext();
+  return Ctx.getCanonicalType(T->getTemplatedDecl()->getUnderlyingType());
+}
+
+#if 0
+
+ClassTemplateDecl *extractClassTemplateDeclFromTemplateAlias(
+    Sema &S, TypeAliasTemplateDecl *const AliasTemplate, SourceLocation Loc) {
+  const QualType CanonTy = getCanonicalTypeFromTemplateAlias(AliasTemplate);
+  const TemplateSpecializationType *ClassSpecTST =
+      CanonTy->getAs<TemplateSpecializationType>();
+  if (!ClassSpecTST) {
+    if (CanonTy->getAs<DependentTemplateSpecializationType>()) {
+      // template<class T, class U> using TA = typename X<T>::template Y<U>;
+      emitCustomError(S, "missing template arguments, can not deduce "
+                         "template arguments for a template alias for a "
+                         "dependent template name",
+                      Loc, SourceRange());
+    } else {
+      emitCustomError(S, "missing template arguments, can not deduce "
+                         "template arguments for a template alias whose "
+                         "eventual type is not a dependent class template "
+                         "specialization",
+                      Loc, SourceRange());
+    }
+    return nullptr;
+  }
+  // This should be a dependent type, since we at the canonical type.
+  assert(ClassSpecTST->isDependentType());
+  ClassTemplateDecl *CurAliasedClassTemplate =
+      dyn_cast_or_null<ClassTemplateDecl>(
+          ClassSpecTST->getTemplateName().getAsTemplateDecl());
+  if (!CurAliasedClassTemplate) {
+    emitCustomError(S, "missing template arguments, can not deduce "
+                       "template arguments for a template alias whose "
+                       "eventual type is not a class template specialization",
+                    Loc, SourceRange());
+    return nullptr;
+  }
+  return CurAliasedClassTemplate;
+}
+
+// This gets the template arguments from the outer scopes, including the ones
+// substituted into the current specialization.
+MultiLevelTemplateArgumentList
+getSubstitutedArgsForPartiallySubstitutedClassTemplateFromTemplateAlias(
+    Sema &S,
+    TypeAliasTemplateDecl *const PartiallySubstitutedClassTemplateAlias) {
+  const TemplateSpecializationType *DependentClassSpecTST =
+      getCanonicalTypeFromTemplateAlias(PartiallySubstitutedClassTemplateAlias)
+          ->getAs<TemplateSpecializationType>();
+  assert(DependentClassSpecTST);
+  assert(DependentClassSpecTST->isDependentType());
+
+  TemplateArgumentList InnermostTAL(TemplateArgumentList::OnStack,
+                                    DependentClassSpecTST->getArgs(),
+                                    DependentClassSpecTST->getNumArgs());
+  ClassTemplateDecl *PartiallySubstitutedClassTemplate =
+      dyn_cast_or_null<ClassTemplateDecl>(
+          DependentClassSpecTST->getTemplateName().getAsTemplateDecl());
+  return S.getTemplateInstantiationArgs(PartiallySubstitutedClassTemplate,
+                                        &InnermostTAL);
+}
+#endif
+
+// Given a template alias, extract the class template it eventually aliases,
+// emitting errors if it does not alias one.
+bool extractClassTemplateDeclFromTemplateAlias(
+    Sema &S, TypeAliasTemplateDecl *const CurAliasTemplate, SourceLocation Loc,
+    TemplateParameterList *&AliasOrClassTPL,
+    MultiLevelTemplateArgumentList &TemplateArgs,
+    TemplateDecl *&TemplDecl, QualType &RetTyUponFail, const AutoType *DeducibleTy) {
+  QualType CanonTy = getCanonicalTypeFromTemplateAlias(CurAliasTemplate);
+
+  // If we are going to fail, try and complete the template-id first to see if
+  // default arguments or trailing parameter packs might allow us to well-form
+  // it.  If it does well-form, then store the type in RetTyUponFail.
+  QualType checkCompleteTemplateIdType(Sema & S, const AutoType *T,
+                                       SourceLocation TemplateNameLoc);
+
+  RetTyUponFail = QualType();
+  const TemplateSpecializationType *UnderlyingClassTST =
+      CanonTy->getAs<TemplateSpecializationType>();
+  std::string diag_str;
+  auto EmitDiag = [&S, &Loc, &diag_str] {
+    assert(diag_str.length());
+    emitCustomError(S, diag_str, Loc, SourceRange());
+    return true;
+  };
+
+  if (!UnderlyingClassTST) {
+    if (CanonTy->getAs<DependentTemplateSpecializationType>()) {
+      // template<class T, class U> using TA = typename X<T>::template Y<U>;
+      diag_str = "missing template arguments, can not deduce "
+                         "template arguments for a template alias for a "
+                         "dependent template name";
+    } else {
+      diag_str = "missing template arguments, can not deduce "
+                 "template arguments for a template alias whose "
+                 "eventual type is not a dependent class template "
+                 "specialization";
+    }
+    DiagnosticErrorTrap Trap(S.getDiagnostics());
+    RetTyUponFail = checkCompleteTemplateIdType(S, DeducibleTy, Loc);
+    if (!RetTyUponFail.isNull() || Trap.hasErrorOccurred() || EmitDiag())
+      return true;
+  }
+  // This should be a dependent type.
+  assert(UnderlyingClassTST->isDependentType());
+  ClassTemplateDecl *CurAliasedClassTemplate =
+      dyn_cast_or_null<ClassTemplateDecl>(
+          UnderlyingClassTST->getTemplateName().getAsTemplateDecl());
+  if (!CurAliasedClassTemplate) {
+    diag_str = "missing template arguments, can not deduce "
+                       "template arguments for a template alias whose "
+                       "eventual type is not a class template specialization";
+    DiagnosticErrorTrap Trap(S.getDiagnostics());
+    RetTyUponFail = checkCompleteTemplateIdType(S, DeducibleTy, Loc);
+    if (!RetTyUponFail.isNull() || Trap.hasErrorOccurred() || EmitDiag())
+      return true;
+    
+  }
+
+  // Now get the template arguments from the class template, and use the
+  // template parameter list of the template alias.
+  AliasOrClassTPL = CurAliasTemplate->getTemplateParameters();
+  // Get the template arguments from the template-id of the underlying class
+  // template of the alias.
+
+  // template<class T, class U = char *> struct A { A(T); };
+  // template<class T> using TA = A<T*>;
+  // InnermostTAL = <T*, char*>
+  TemplateArgumentList InnermostTAL(TemplateArgumentList::OnStack,
+                                    UnderlyingClassTST->getArgs(),
+                                    UnderlyingClassTST->getNumArgs());
+  TemplateArgs =
+      S.getTemplateInstantiationArgs(CurAliasedClassTemplate, &InnermostTAL);
+  
+  TemplDecl = CurAliasedClassTemplate;
+  
+  // Don't adjust for the innermost template level that we substituted into
+  TemplateArgs.setAdjustmentForUnsubstitutableTemplateParmeters(
+      TemplateArgs.getNumLevels() - 1);
+  return false;
+}
+
+QualType deduceClassSpecializationTypeFromArguments(
+    Sema &S, QualType AutoClassTemplateTy, ArrayRef<Expr *> Args,
+    SourceLocation Loc, TypeSourceInfo **OutTSI = nullptr) {
+  ASTContext &Context = S.Context;
+  QualType RetTy;
+  // FIXME: What do we have to do with qualified types and elaborated types - we
+  // need to reconstruct them - currently we lose that information.
+  const AutoType *TemplateAutoType =
+      getAsDeducibleClassTemplateType(AutoClassTemplateTy);
+  assert(TemplateAutoType && TemplateAutoType->isTemplateAuto());
+  auto HasAnyDependentArgs = [](ArrayRef<Expr *> Args) {
+    for (auto *E : Args)
+      if (E->isInstantiationDependent() || E->isTypeDependent() ||
+          E->isValueDependent())
+        return true;
+    return false;
+  };
+  //FIXME: Make sure none of the explicitly specified args are dependent.
+
+  // Only deduce the class specialization if the arguments are not dependent,
+  // and if the class template that is being deduced is at depth 0.
+  if (HasAnyDependentArgs(Args) ||
+      TemplateAutoType->getTemplateDecl()->getTemplateParameters()->getDepth())
+    return AutoClassTemplateTy;
+  // If we were able to deduce a replaceable type, update the type source info.
+  auto UpdateTypeSourceInfo = [&OutTSI, &Loc, &S](
+      QualType NewTST, const TemplateArgumentListInfo *TALI) {
+    if (OutTSI) {
+      SourceLocation TemplateNameLoc = Loc;
+      auto *TSTy = NewTST->getAs<TemplateSpecializationType>();
+      assert(TSTy);
+      *OutTSI = S.Context.getTemplateSpecializationTypeInfo(
+          TSTy->getTemplateName(), TemplateNameLoc, *TALI, NewTST);
+    }
+  };
+  MultiLevelTemplateArgumentList EnclosingTemplateArgs;
+  const MultiLevelTemplateArgumentList *TemplateArgsPtr = nullptr;
+  const TemplateName CurTemplateName = TemplateAutoType->getTemplateName();
+  TemplateDecl *const InitTemplDecl = cast<TemplateDecl>(
+      TemplateAutoType->getTemplateDecl()->getCanonicalDecl());
+  // TemplDecl is set to the class template decl.
+  TemplateDecl *UnderlyingClassTemplDecl = InitTemplDecl;
+  TemplateParameterList *AliasOrClassTPL = nullptr;
+
+  const bool WasTemplateAlias = isa<TypeAliasTemplateDecl>(InitTemplDecl);
+  if (auto *AliasTempl = dyn_cast<TypeAliasTemplateDecl>(InitTemplDecl)) {
+
+    if (extractClassTemplateDeclFromTemplateAlias(
+            S, AliasTempl, Loc, AliasOrClassTPL, EnclosingTemplateArgs,
+            UnderlyingClassTemplDecl, RetTy, TemplateAutoType)) {
+      // We do not have a class template, but were able to complete the type
+      // with using the explicit args so update the type source info and const
+      // qualifiers.
+      if (!RetTy.isNull()) {
+        const ASTTemplateArgumentListInfo *ExplicitArgs =
+            TemplateAutoType->getExplicitArgs();
+        assert(ExplicitArgs && "How were we able to complete a template id without explicit args!");
+        TemplateArgumentListInfo TALI(ExplicitArgs->LAngleLoc, ExplicitArgs->RAngleLoc);
+        ExplicitArgs->copyInto(TALI);
+        UpdateTypeSourceInfo(RetTy, &TALI);
+        RetTy.setLocalFastQualifiers(
+            AutoClassTemplateTy.getLocalFastQualifiers());
+      }
+      return RetTy;
+    }
+    TemplateArgsPtr = &EnclosingTemplateArgs;
+  }
+
+  // Now that we have a class template, get the prototype template, substitute
+  // into it any enclosing template arguments (for instance if it is a member
+  // class template)
+  ClassTemplateDecl *const CurClassTemplate =
+      dyn_cast<ClassTemplateDecl>(UnderlyingClassTemplDecl);
+
+  CXXRecordDecl *const CurClassPattern = CurClassTemplate->getTemplatedDecl();
+
+  CXXRecordDecl *ProtoClassPattern = CurClassPattern;
+
+  const ClassTemplateDecl *ProtoClassTemplate = CurClassTemplate;
+
+  // If the class template was instantiated from a member template, then get its
+  // nearest ancestor that has its type complete. Then get its templated decl,
+  // then get the parent's template arguments so that we can generate all the
+  // ctors from it.  Note we do not care about partial specializations here
+  // during template argument deduction from constructors.
+  
+  // 
+  // template<class T> struct A { 
+  //   template<class U> struct B { B(U); };
+  // };
+  // A<int>::B b(3); 
+  // 
+  if (const ClassTemplateDecl *AncestorTemplateDecl =
+          ProtoClassTemplate->getInstantiatedFromMemberTemplate()) {
+    do {
+      // As soon as we find an ancestor member template that has its definition
+      // marked complete, we can check it for its constructor declarations.
+      if (ProtoClassTemplate->getTemplatedDecl()->isCompleteDefinition())
+        break;
+      ProtoClassTemplate = AncestorTemplateDecl;
+    } while (AncestorTemplateDecl =
+                 AncestorTemplateDecl->getInstantiatedFromMemberTemplate());
+
+    ProtoClassPattern = ProtoClassTemplate->getTemplatedDecl();
+    assert(!WasTemplateAlias || TemplateArgsPtr);
+    
+    if (!TemplateArgsPtr) {
+      EnclosingTemplateArgs = S.getTemplateInstantiationArgs(
+          cast<CXXRecordDecl>(CurClassTemplate->getDeclContext()));
+      TemplateArgsPtr = &EnclosingTemplateArgs;
+    }
+  } else if (!TemplateArgsPtr) {
+    // We need this to make a copy of the pattern decl so we can add implicit
+    // constructors to it, otherwise they get added to the prototype pattern.
+    QualType CurClassCanonTy = S.Context.getCanonicalType(
+        CurClassTemplate->getInjectedClassNameSpecialization());
+    const TemplateSpecializationType *TST =
+        CurClassCanonTy->getAs<TemplateSpecializationType>();
+    TemplateArgumentList InnermostTAL(TemplateArgumentList::OnStack,
+                                      TST->getArgs(), TST->getNumArgs());
+    EnclosingTemplateArgs.addOuterTemplateArguments(&InnermostTAL);
+    TemplateArgsPtr = &EnclosingTemplateArgs;
+    EnclosingTemplateArgs.setAdjustmentForUnsubstitutableTemplateParmeters(0);
+  }
+ 
+  if (!AliasOrClassTPL)
+    AliasOrClassTPL = CurClassTemplate->getTemplateParameters();
+  assert(TemplateArgsPtr);
+
+  CXXRecordDecl *InventedClassPattern = CXXRecordDecl::Create(
+      S.Context, CurClassPattern->getTagKind(),
+      CurClassPattern->getDeclContext(), CurClassPattern->getLocStart(),
+      CurClassPattern->getLocation(), CurClassPattern->getIdentifier(), nullptr,
+      /*DelayTypeCreation=*/true);
+  InventedClassPattern->setImplicit(true);
+  InventedClassPattern->setQualifierInfo(CurClassPattern->getQualifierLoc());
+  // Get the type name.
+  ClassTemplateDecl *InventedClassTemplate = CurClassTemplate;
+#if 0
+    InventedClassTemplate = ClassTemplateDecl::Create(
+        S.Context, CurClassTemplate->getDeclContext(),
+        CurClassTemplate->getLocation(), CurClassTemplate->getDeclName(),
+        CurClassTemplate->getTemplateParameters(), InventedClassTemplate,
+        /*PrevDecl*/ nullptr);
+#endif
+  // FIXME: We currently do not invent a new ClassTemplateDecl, since it avoids
+  // messing up adoption of template parameter lists that occurs within the
+  // constructor and when we conduct lookup into an instantiated context,
+  // we need to find the original template, so that during template argument
+  // deduction, when comparing whether an injected class name is the same, it
+  // works - otherwise template argument deduction gets confused.  All this
+  // seems very hackish...
+  InventedClassPattern->setDescribedClassTemplate(InventedClassTemplate);
+  // Trigger creation of the type for the instantiation.
+  S.Context.getInjectedClassNameType(
+      InventedClassPattern,
+      InventedClassTemplate->getInjectedClassNameSpecialization());
+
+  // Just try and substitute into the member declarations - ignoring ALL
+  // substitution errors - we do not care if the class is an invalid decl since
+  // we only use it to substitute into ctors.
+  {
+    Sema::DiagnosticInterceptor Trap(S);
+    S.InstantiateClass(Loc, InventedClassPattern, ProtoClassPattern,
+                       *TemplateArgsPtr, TSK_ImplicitInstantiation,
+                       /*Complain*/ false,
+                       /*InstantiateConstructorsOnly*/ true);
+  }
+
+  // If the primary class template is complete, we need to consider the
+  // implicitly declared constructors (default, copy, move) if any.
+  if (ProtoClassPattern->isCompleteDefinition()) {
+    // When declaring implicit constructors, all we need to do is substitute any
+    // arguments provided by a template alias - any outer arguments will be
+    // substituted automatically when the ctors are generated from teh invented
+    // class pattern.
+    MultiLevelTemplateArgumentList TemplateAliasArgs;
+    auto *TemplateAliasArgsPtr =
+        WasTemplateAlias ? &TemplateAliasArgs : nullptr;
+    if (TemplateAliasArgsPtr) {
+      TemplateAliasArgs.addOuterTemplateArguments(
+          TemplateArgsPtr->getInnermost());
+    }
+    declareImplicitConstructors(S, InventedClassPattern, TemplateAliasArgsPtr,
+                                Loc);
+  }
+  std::vector<const FunctionTemplateDecl *> CtorSet =
+      synthesizeFunctionTemplateForEachConstructor(
+          S, collectAllConstructors(S, InventedClassPattern), AliasOrClassTPL,
+          InventedClassPattern);
+
+  // If we were using enclosing template arguments to substitute into just to
+  // make a copy of the instantiation pattern into which we can add constructors
+  // without consequence, we don't need that for class template deducers, so
+  // clear it out if the classtemplate has no ancestor, which means it is at the
+  // top level.
+
+  if (ProtoClassTemplate == CurClassTemplate && !WasTemplateAlias)
+    TemplateArgsPtr = nullptr;
+  
+  // Now deal with all the canonical class template deducers. When using
+  // template aliases for class tempalte deducers, we don't substitute the
+  // template alias substitutions into the template deducer but rather check
+  // against the template-id of the return value - so remove the inner most
+  // template arguments (since they represent the alias substitutions).
+  MultiLevelTemplateArgumentList TemplateArgsForDeducersUsingTemplateAliases;
+  if (TemplateArgsPtr && WasTemplateAlias) {
+    if (TemplateArgsPtr->getNumLevels() > 1) {
+      for (unsigned I = 1; I < TemplateArgsPtr->getNumLevels(); ++I)
+        TemplateArgsForDeducersUsingTemplateAliases.addOuterTemplateArguments(
+            TemplateArgsPtr->getArgList(I));
+      TemplateArgsPtr = &TemplateArgsForDeducersUsingTemplateAliases;
+    } else
+      TemplateArgsPtr = nullptr;
+  }
+  for (FunctionTemplateDecl *FTD :
+       S.Context.getClassTemplateDeducers(ProtoClassTemplate)) {
+    
+    FunctionTemplateDecl *NewFTD = FTD;
+    // Substitute any enclosing template arguments if needed.
+    if (TemplateArgsPtr) {
+      SourceLocation PointOfInstantiation = Loc;
+      DeclContext *Owner =
+        InventedClassPattern->getDeclContext(); 
+      Sema::ContextRAII EnterContext(S, Owner);
+      Sema::InstantiatingTemplate Inst(S, PointOfInstantiation, FTD);
+      if (Inst.isInvalid())
+        return QualType();
+      Sema::SFINAETrap Trap(S, true);
+      NewFTD = cast_or_null<FunctionTemplateDecl>(
+          S.SubstDecl(FTD, Owner, *TemplateArgsPtr));
+    }
+    if (NewFTD)
+      CtorSet.push_back(NewFTD);
+  }
+
+  OverloadCandidateSet OvlFunSet(Loc, OverloadCandidateSet::CSK_Normal);
+  TemplateArgumentListInfo ExplicitArgs;
+  TemplateArgumentListInfo *ExplicitArgsPtr = nullptr;
+  if (ASTTemplateArgumentListInfo *TLI = TemplateAutoType->getExplicitArgs()) {
+    // Don't try and optimize around whether an empy template argument list is
+    // provided, because it prevents us from attempting to complete the
+    // template-id (which would work for a template parameter pack) if deduction
+    // fails.
+    TLI->copyInto(ExplicitArgs);
+    ExplicitArgsPtr = &ExplicitArgs;
+  }
+
+  for (const FunctionTemplateDecl *FTD : CtorSet) {
+    // For a class template deducer, if explicit args were provided at point of
+    // ctor call, then determine the explicit args as they correspond to the
+    // deducer by deducing against the return type.
+    TemplateArgumentListInfo *CurDeducerExplicitArgsPtr = nullptr;
+    SourceLocation LocForDeducerExplicitArgs = Loc;
+    TemplateArgumentListInfo DeducerExplicitArgs(LocForDeducerExplicitArgs,
+                                                 LocForDeducerExplicitArgs);
+
+    if (FTD->isClassTemplateDeducer() && ExplicitArgsPtr) {
+      Sema::TemplateDeductionResult DeduceTemplateArguments(
+          Sema & S, TemplateParameterList * TemplateParams,
+          const TemplateArgumentList &ParamList,
+          const TemplateArgumentList &ArgList, TemplateDeductionInfo &Info,
+          SmallVectorImpl<DeducedTemplateArgument> &Deduced);
+      QualType CanonDeducerRetTy =
+          Context.getCanonicalType(FTD->getTemplatedDecl()->getReturnType());
+      // Get to the TST or ClassTemplateSpecializationDecl from the return type
+      // See if we can deduce using the DeducerRetTy as the parameter and the
+      // explicit-args as the argument.  Which ever arguments we can substitute,
+      // make them explicit arguments - use injected arguments to replace the
+      // other ones with themselves. if we can not, eliminate this FTD If we
+      // can, determine the mapping from the explicitly specified template args,
+      // to the template parameter, and substitute into the FTD - agains.
+
+      // Extract the template arguments from the deducer ret type and the
+      // explicitly specifed arguments and package them as a
+      // TemplateArgumentList.
+
+      const TemplateArgumentList *DeducerRetTArgListPtr = nullptr;
+      const TemplateArgument *TArgs = nullptr;
+      unsigned NumArgs = 0;
+      if (const auto *TST = CanonDeducerRetTy->getAs<TemplateSpecializationType>()) {
+        NumArgs = TST->getNumArgs();
+        TArgs = TST->getArgs();
+      } else {
+        // This must be a class template specialization decl
+        const ClassTemplateSpecializationDecl *CTSD =
+              cast<ClassTemplateSpecializationDecl>(
+                  CanonDeducerRetTy->getAsCXXRecordDecl());
+        DeducerRetTArgListPtr = &CTSD->getTemplateArgs();  
+      }
+
+      // The Deducer's return type will be the parameter against which we will
+      // deduce.
+      TemplateArgumentList DeducerRetTemplArgList(
+          TemplateArgumentList::OnStack,
+          DeducerRetTArgListPtr ? DeducerRetTArgListPtr->data() : TArgs,
+          TArgs ? NumArgs : DeducerRetTArgListPtr->size());
+      
+      // Form a template argument list from the explicit arguments provided.
+      SmallVector<TemplateArgument, 8> ExplicitArgVec;
+      for (auto &&TALoc : ExplicitArgsPtr->arguments())
+        ExplicitArgVec.push_back(TALoc.getArgument());
+      // This will be our args
+      TemplateArgumentList ExplicitArgsList(TemplateArgumentList::OnStack,
+                                            ExplicitArgVec.data(),
+                                            ExplicitArgVec.size());
+
+      SmallVector<DeducedTemplateArgument, 4> Deduced;
+      TemplateDeductionInfo Info(Loc);
+      Deduced.resize(FTD->getTemplateParameters()->size());
+
+      // Perform the deduction, and if it fails, skip this deducer.
+      if (const bool Failed = DeduceTemplateArguments(
+              S, FTD->getTemplateParameters(), DeducerRetTemplArgList,
+              ExplicitArgsList, Info, Deduced))
+        continue;
+
+      // Create explicit arguments
+      SmallVector<TemplateArgument, 8> GeneratedTemplateArgsFromTPL;
+      // Since deduction against the return type of a canonical factory deducer can
+      // result in deduced template arguments out of order, we need to maintain that
+
+      // For e.g.
+      //   - template<class T, class U> A<U, T> A(T, U);
+      //   A<int> a("abc", 'a'); <=> A<int, const char*>
+      //  But the explicit args to the canonical deducer must be A_Deducer<T,int>
+
+      //  so generate the sample arguments from the tpl, and then replace the ones
+      //  that we have explicitly specified.
+#if 1
+      GeneratedTemplateArgsFromTPL.resize(FTD->getTemplateParameters()->size());
+
+      void GenerateInjectedTemplateArgs(ASTContext & Context,
+                                        TemplateParameterList * Params,
+                                        TemplateArgument * Args, 
+                                        bool Canonicalize);
+
+      GenerateInjectedTemplateArgs(S.Context, FTD->getTemplateParameters(),
+                                   GeneratedTemplateArgsFromTPL.data(), 
+                                   /*Canonicalize*/true);
+      bool CanSubstituteExplicit = false;
+      
+      for (unsigned I = 0; I < Deduced.size(); ++I) {
+        if (!Deduced[I].isNull()) {
+          CanSubstituteExplicit = true;
+          GeneratedTemplateArgsFromTPL[I] = Deduced[I];
+        }
+      }
+#else
+      bool CanSubstituteExplicit = false;
+      GeneratedTemplateArgsFromTPL.resize(Deduced.size());
+      for (unsigned I = 0; I < Deduced.size(); ++I) {
+        if (!Deduced[I].isNull()) {
+          CanSubstituteExplicit = true;
+          GeneratedTemplateArgsFromTPL[I] = Deduced[I];
+        }
+      }
+#endif
+      if (CanSubstituteExplicit) {
+        
+        
+        TemplateArgumentList TemplateArgsToSubstIntoDeducer(
+            TemplateArgumentList::OnStack, GeneratedTemplateArgsFromTPL.data(),
+            GeneratedTemplateArgsFromTPL.size());
+
+        /*
+        Sema::InstantiatingTemplate Inst(
+            S, Loc, const_cast<FunctionTemplateDecl *>(FTD));
+        if (Inst.isInvalid())
+          return QualType();
+        Sema::SFINAETrap Trap(S, true);
+        DeclContext *Owner = InventedClassPattern->getDeclContext();
+        MultiLevelTemplateArgumentList MultiTemplateArgsToSubstIntoDeducer;
+        
+        MultiTemplateArgsToSubstIntoDeducer.addOuterTemplateArguments(
+            &TemplateArgsToSubstIntoDeducer);
+        MultiTemplateArgsToSubstIntoDeducer.setAdjustmentForUnsubstitutableTemplateParmeters(0);
+        FunctionTemplateDecl *NewFTD = cast_or_null<FunctionTemplateDecl>(
+            S.SubstDecl(const_cast<FunctionTemplateDecl *>(FTD), Owner,
+                        MultiTemplateArgsToSubstIntoDeducer));
+        */
+        TemplateParameterList *DeducerTPL = FTD->getTemplateParameters();
+        addTrivialLocationInfoToTemplateArguments(
+            S, &TemplateArgsToSubstIntoDeducer,
+            TemplateArgsToSubstIntoDeducer.size(), DeducerTPL,
+            LocForDeducerExplicitArgs, DeducerExplicitArgs);
+        CurDeducerExplicitArgsPtr = &DeducerExplicitArgs;
+        
+      }
+    }
+
+    S.AddTemplateOverloadCandidate(
+        const_cast<FunctionTemplateDecl *>(FTD),
+        DeclAccessPair::make(const_cast<FunctionTemplateDecl *>(FTD), AS_none),
+        /*ExplicitTemplateArgs*/ FTD->isClassTemplateDeducer()
+            ? CurDeducerExplicitArgsPtr
+            : ExplicitArgsPtr,
+        Args, OvlFunSet);
+  }
+
+  // FIXME: Figure out hte best location for error deposition.
+  SourceLocation OvlErrorLoc = Loc;
+
+  OverloadCandidateSet::iterator Best;
+  OverloadingResult OverloadResult =
+      OvlFunSet.BestViableFunction(S, OvlErrorLoc, Best);
+  QualType ExplicitlyFormedTemplateIdType;
+  // If we fail to find a constructor or class template deducer that succeeds in
+  // deducing the template args, check to see if we had explicit args, and
+  // whethere those explicit args would result in a proper template-id type (say
+  // we have a trailing pack), then check to see if we can form a proper
+  // specialization.
+  bool ErrorsReportedDuringFormingTemplateId = false;
+  auto CanFormTemplateIdTypeFromExplicitArgs =
+      [&S, &ExplicitlyFormedTemplateIdType, CurClassTemplate, ExplicitArgsPtr,
+       AliasOrClassTPL, Loc, &UpdateTypeSourceInfo,
+       &ErrorsReportedDuringFormingTemplateId, CurTemplateName] {
+    if (!ExplicitArgsPtr)
+      return false;
+    DiagnosticErrorTrap Trap(S.getDiagnostics());
+    ExplicitlyFormedTemplateIdType = S.CheckTemplateIdType(
+        /*TemplateName(CurClassTemplate)*/ CurTemplateName, Loc,
+        *ExplicitArgsPtr, /*AllowPartialArgs*/ false,
+        /*AttemptCompletingClassTemplateIdUponDeductionFailure*/ true);
+    ErrorsReportedDuringFormingTemplateId = Trap.hasErrorOccurred();
+    if (ExplicitlyFormedTemplateIdType.isNull())
+      return false;
+    UpdateTypeSourceInfo(ExplicitlyFormedTemplateIdType, ExplicitArgsPtr);
+    
+    // This assert can not hold if we have a default argument at the end.
+    // assert(AliasOrClassTPL->getParam(AliasOrClassTPL->size() - 1)
+    //           ->isTemplateParameterPack());
+    return true;
+  };
+
+  switch (OverloadResult) {
+  case OR_Success:
+    break;
+  case OR_No_Viable_Function:
+    if (CanFormTemplateIdTypeFromExplicitArgs())
+      return ExplicitlyFormedTemplateIdType;
+    if (ErrorsReportedDuringFormingTemplateId)
+      return QualType();
+
+    emitCustomError(S,
+                    "missing template arguments, no viable constructor "
+                    "when deducing class template arguments from initializers",
+                    OvlErrorLoc, SourceRange());
+    OvlFunSet.NoteCandidates(S, OCD_AllCandidates, Args);
+
+    return QualType();
+  case OR_Ambiguous:
+    if (CanFormTemplateIdTypeFromExplicitArgs())
+      return ExplicitlyFormedTemplateIdType;
+    if (ErrorsReportedDuringFormingTemplateId) 
+      return QualType();
+    emitCustomError(S, "missing template arguments, ambiguous constructors "
+                       "when deducing class template arguments from "
+                       "initializers",
+                    OvlErrorLoc, SourceRange());
+    
+    OvlFunSet.NoteCandidates(S, OCD_ViableCandidates, Args);
+    return QualType();
+
+  case OR_Deleted:
+    if (CanFormTemplateIdTypeFromExplicitArgs())
+      return ExplicitlyFormedTemplateIdType;
+    if (ErrorsReportedDuringFormingTemplateId) 
+      return QualType();
+    emitCustomError(S, "missing template arguments, resolved to deleted "
+                       "function when deducing class template arguments from "
+                       "initializers",
+                    OvlErrorLoc, SourceRange());
+    S.NoteOverloadCandidate(Best->Function);
+    return QualType();
+  }
+  assert(Best);
+  FunctionDecl *Specialization = Best->Function;
+  
+  // If we have a return type that is not void, then we have a deducer function,
+  // and so use its return type.
+  QualType DeducerReturnTy =
+      S.Context.getCanonicalType(Specialization->getReturnType());
+
+  // We must not have a deducer specialization if the return type was not a
+  // class template specialization decl.
+  const ClassTemplateSpecializationDecl *const DeducerRetSpecD =
+      dyn_cast_or_null<ClassTemplateSpecializationDecl>(
+          DeducerReturnTy->getAsCXXRecordDecl());
+
+  assert((DeducerReturnTy->isVoidType() || DeducerRetSpecD) &&
+         "either the return type should be void or a class specialization");
+
+  if (!DeducerRetSpecD)
+    DeducerReturnTy = QualType();
+  const TemplateArgumentList *DeducedClassTemplateTAL = nullptr;
+  const bool DeducerFunctionWasUsed = DeducerRetSpecD;
+  if (DeducerFunctionWasUsed) {
+    DeducedClassTemplateTAL = &DeducerRetSpecD->getTemplateArgs();
+  } else {
+    DeducedClassTemplateTAL = Specialization->getTemplateSpecializationArgs();
+  }
+  // If we did not end up using a deducer template, then only use the template
+  // arguments corresponding to the template class or template alias, and ignore
+  // those from any member constructor templates.
+  const size_t NumTemplateArgsToUse =
+      DeducerRetSpecD ? DeducedClassTemplateTAL->size() : AliasOrClassTPL->size();
+  assert(DeducedClassTemplateTAL->size() >= NumTemplateArgsToUse);
+  // Convert the Template Argument List into TemplateArgumentListInfo, so it can
+  // be passed to CheckTemplateIdType.
+
+  SourceLocation LocForTALI = Loc;
+  TemplateArgumentListInfo TALI(LocForTALI, LocForTALI);
+  TemplateParameterList *SpecializationTPL =
+      DeducerRetSpecD ? CurClassTemplate->getTemplateParameters()
+                      : AliasOrClassTPL;
+  addTrivialLocationInfoToTemplateArguments(
+      S, DeducedClassTemplateTAL, NumTemplateArgsToUse, SpecializationTPL,
+      LocForTALI, TALI);
+  // If this was a template alias, plug the arguments back into the template
+  // alias and get the substituted alias type.
+
+  QualType ClassSpecType;
+
+  // If we deduced template arguments from a deducer template, we already have
+  // our class template specialization, except that we need to check that it is
+  // consistent with the template alias's template-id
+
+  if (DeducerFunctionWasUsed) {
+    if (WasTemplateAlias) {
+      // We used a deducer function so check to see if it is consistent with a
+      // template-id that could be formed by the template alias.
+      
+      const TypeAliasTemplateDecl *TA =
+          cast<TypeAliasTemplateDecl>(InitTemplDecl);
+      QualType PT1(DeducerReturnTy);
+      QualType PT2(S.Context.getCanonicalType(
+          TA->getTemplatedDecl()->getUnderlyingType()));
+      // Determine whether we can deduce PT1 from PT2
+      SmallVector<DeducedTemplateArgument, 4> Deduced;
+      TemplateDeductionInfo Info(Loc);
+      Deduced.resize(TA->getTemplateParameters()->size());
+
+      bool Failed = DeduceTemplateArgumentsByTypeMatch(
+          S, TA->getTemplateParameters(), PT2, PT1, Info, Deduced,
+          /*TDF_None*/ 0,
+          /*PartialOrdering=*/true);
+      if (Failed) {
+        emitCustomError(S, "could not deduce template alias based "
+                           "template-id from class template deducer's "
+                           "resultant template arguments",
+                        Loc, SourceRange());
+        return QualType();
+      }
+    }
+    // If the user provided explicit args, check that the return type of our
+    // deducer function is consistent with the explicit args.
+    if (ExplicitArgsPtr) {
+      assert(DeducerReturnTy->getAsCXXRecordDecl() &&
+             "how did we get a deducer return type whose canonical type is not "
+             "a class template specializatin decl?!");
+      assert(isa<ClassTemplateSpecializationDecl>(
+                 DeducerReturnTy->getAsCXXRecordDecl()) &&
+             "how did we get a deducer return type whose canonical type is not "
+             "a class template specializatin decl?!");
+      const ClassTemplateSpecializationDecl *DeducerRetClassSpec =
+          cast<ClassTemplateSpecializationDecl>(
+              DeducerReturnTy->getAsCXXRecordDecl());
+      const TemplateArgumentList &DeducerRetTemplateArgs =
+          DeducerRetClassSpec->getTemplateArgs();
+      // This is not always true.
+      assert(ExplicitArgsPtr->size() <= DeducerRetTemplateArgs.size());
+      const unsigned MinNumArgs = std::min(ExplicitArgsPtr->size(), DeducerRetTemplateArgs.size());
+      for (unsigned I  = 0; I != MinNumArgs; ++I) {
+        const TemplateArgument &DA = DeducerRetTemplateArgs.get(I);
+        
+        const TemplateArgument &EA = (*ExplicitArgsPtr)[I].getArgument();
+        
+        bool isSameTemplateArg(ASTContext &Context,
+                              const TemplateArgument &X,
+                              const TemplateArgument &Y);
+        if (!isSameTemplateArg(S.Context, DA, EA)) {
+          emitCustomError(S, "deduced template arguments for class template "
+                             "are not consistent with explicitly specified "
+                             "arguments",
+                          (*ExplicitArgsPtr)[I].getLocation(),
+                          (*ExplicitArgsPtr)[I].getSourceRange());
+          return QualType();
+        }
+      }
+    }
+    ClassSpecType = DeducerReturnTy;
+  } else if (WasTemplateAlias) {
+    DiagnosticErrorTrap TrackErrors(S.getDiagnostics());
+    ClassSpecType =
+        S.CheckTemplateIdType(TemplateName(InitTemplDecl), Loc, TALI, /*AllowPartialArgs*/false);
+    if (ClassSpecType.isNull()) {
+      assert(TrackErrors.hasErrorOccurred());
+      return QualType();
+    }
+  } else {
+    ClassSpecType = S.CheckTemplateIdType(
+        TemplateName(const_cast<ClassTemplateDecl *>(CurClassTemplate)), Loc,
+        TALI, /*AllowPartialArgs*/false);
+  }
+  assert(!ClassSpecType.isNull());
+  if (!ClassSpecType->getAs<TemplateSpecializationType>()) {
+    assert(!DeducerReturnTy.isNull());
+    ClassSpecType = S.Context.getTemplateSpecializationType(
+        TemplateName(CurClassTemplate), TALI, ClassSpecType);
+  }
+  
+  // FIXME: We need the proper Template Name Loc
+  UpdateTypeSourceInfo(ClassSpecType, &TALI);
+  RetTy = ClassSpecType;
+  // Restore any qualifiers
+  RetTy.setLocalFastQualifiers(AutoClassTemplateTy.getLocalFastQualifiers());
+  return RetTy;
+}
+
+
 /// AddInitializerToDecl - Adds the initializer Init to the
 /// declaration dcl. If DirectInit is true, this is C++ direct
 /// initialization rather than copy initialization.
@@ -9215,9 +10375,27 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
     RealDecl->setInvalidDecl();
     return;
   }
+  const QualType VDeclTy = VDecl->getType();
+  // If we need to deduce the class template specialization type from the ctor
+  // arguments, do so.
+  if (getAsDeducibleClassTemplateType(VDeclTy)) {
+    TypeSourceInfo *NewVarTSI = VDecl->getTypeSourceInfo();
+    QualType ClassSpecDeducedTy = deduceClassSpecializationTypeFromArguments(
+        *this, VDeclTy, getAsExprArray(Init), RealDecl->getLocStart(), 
+        &NewVarTSI);
+    
+    if (ClassSpecDeducedTy.isNull()) {
+      VDecl->setInvalidDecl();
+      return;
+    }
 
+    VDecl->setType(ClassSpecDeducedTy); 
+    if (NewVarTSI) 
+      VDecl->setTypeSourceInfo(NewVarTSI);
+  }
   // C++11 [decl.spec.auto]p6. Deduce the type which 'auto' stands in for.
-  if (TypeMayContainAuto && VDecl->getType()->isUndeducedType()) {
+  if (TypeMayContainAuto && VDecl->getType()->isUndeducedType() &&
+      !getAsDeducibleClassTemplateType(VDeclTy)) {
     // Attempt typo correction early so that the type of the init expression can
     // be deduced based on the chosen correction if the original init contains a
     // TypoExpr.
@@ -9656,6 +10834,16 @@ void Sema::ActOnInitializerError(Decl *D) {
     return;
   }
 
+  // If we were expecting to deduce the class template arguments form the
+  // initializer, obviously we can't if the initializer is broken.
+  if (const AutoType *AT = getAsDeducibleClassTemplateType(Ty)) {
+    VD->setInvalidDecl();
+    emitCustomError(
+        *this,
+        "unable to deduce class template arguments from invalid initializer",
+        VD->getLocation(), VD->getSourceRange());
+    return;
+  }
   // Don't bother complaining about constructors or destructors,
   // though.
 }
@@ -9668,6 +10856,30 @@ void Sema::ActOnUninitializedDecl(Decl *RealDecl,
 
   if (VarDecl *Var = dyn_cast<VarDecl>(RealDecl)) {
     QualType Type = Var->getType();
+
+    if (getAsDeducibleClassTemplateType(Type)) {
+
+      if (!Var->isThisDeclarationADefinition()) {
+        Var->setInvalidDecl();
+        emitCustomError(*this, "missing template arguments after template name",
+                        Var->getLocation(), Var->getSourceRange());
+        return;
+      }
+
+      TypeSourceInfo *NewVarTSI = Var->getTypeSourceInfo();
+      QualType ClassSpecDeducedTy = deduceClassSpecializationTypeFromArguments(
+          *this, Type, ArrayRef<Expr *>(), RealDecl->getLocStart(),
+          &NewVarTSI);
+
+      if (ClassSpecDeducedTy.isNull()) {
+        Var->setInvalidDecl();
+        return;
+      }
+
+      Var->setType(ClassSpecDeducedTy);
+      if (NewVarTSI)
+        Var->setTypeSourceInfo(NewVarTSI);
+    }
 
     // C++11 [dcl.spec.auto]p3
     if (TypeMayContainAuto && Type->getContainedAutoType()) {
@@ -10632,8 +11844,16 @@ ParmVarDecl *Sema::CheckParameter(DeclContext *DC, SourceLocation StartLoc,
       Diag(NameLoc, diag::err_arg_with_address_space);
       New->setInvalidDecl();
     }
-  }   
-
+  }
+  /*
+  if (getAsDeducibleClassTemplateType(T)) {
+    New->setInvalidDecl();
+    emitCustomError(
+        *this,
+        "missing template arguments following template name in parameter",
+        New->getLocation(), New->getSourceRange());
+  }
+  */
   return New;
 }
 
@@ -11042,6 +12262,16 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *D, Stmt *BodyArg) {
 
 Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body,
                                     bool IsInstantiation) {
+  if (FunctionTemplateDecl *FTD = dyn_cast_or_null<FunctionTemplateDecl>(dcl)) {
+    if (FTD->isClassTemplateDeducer() && Body) {
+      emitCustomError(
+          *this,
+          "class template deducer shall only have '=delete' as a definition",
+          Body->getLocStart(), Body->getSourceRange());
+      FTD->setInvalidDecl();
+    }
+  }
+  
   FunctionDecl *FD = dcl ? dcl->getAsFunction() : nullptr;
 
   sema::AnalysisBasedWarnings::Policy WP = AnalysisWarnings.getDefaultPolicy();

@@ -383,6 +383,12 @@ public:
     TemplatedDecl = templatedDecl;
     TemplateParams = templateParams;
   }
+  // Be very careful when using this.  Currently only used when adjusting a
+  // class template deducer declared at class cope from being a member template
+  // to a regular function template
+  void resetTemplatedDecl(NamedDecl *templatedDecl) {
+    TemplatedDecl = templatedDecl;
+  }
 };
 
 /// \brief Provides information about a function template specialization,
@@ -855,6 +861,7 @@ protected:
     /// The first value in the array is the number of of specializations
     /// that follow.
     uint32_t *LazySpecializations;
+    const ClassTemplateDecl *DeducibleClassTemplate = nullptr;
   };
 
   FunctionTemplateDecl(ASTContext &C, DeclContext *DC, SourceLocation L,
@@ -891,7 +898,15 @@ public:
   FunctionDecl *getTemplatedDecl() const {
     return static_cast<FunctionDecl*>(TemplatedDecl);
   }
-
+  bool isClassTemplateDeducer() const {
+    return getDeducibleClassTemplate(); 
+  }
+  const ClassTemplateDecl *getDeducibleClassTemplate() const {
+    return getCommonPtr()->DeducibleClassTemplate;
+  }
+  void setDeducibleClassTemplate(const ClassTemplateDecl *CTD) {
+    getCommonPtr()->DeducibleClassTemplate = CTD;
+  }
   /// Returns whether this template declaration defines the primary
   /// pattern.
   bool isThisDeclarationADefinition() const {

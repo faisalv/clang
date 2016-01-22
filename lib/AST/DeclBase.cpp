@@ -763,8 +763,10 @@ bool Decl::AccessDeclContextSanity() const {
       isa<ClassScopeFunctionSpecializationDecl>(this))
     return true;
 
-  assert(Access != AS_none &&
-         "Access specifier is AS_none inside a record decl");
+  assert(Access != AS_none ||
+         (isa<FunctionTemplateDecl>(this) &&
+          cast<FunctionTemplateDecl>(this)->isClassTemplateDeducer()) &&
+             "Access specifier is AS_none inside a record decl");
 #endif
   return true;
 }

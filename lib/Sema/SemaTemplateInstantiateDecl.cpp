@@ -1243,6 +1243,7 @@ TemplateDeclInstantiator::VisitFunctionTemplateDecl(FunctionTemplateDecl *D) {
   // template from which it was instantiated.
   FunctionTemplateDecl *InstTemplate
     = Instantiated->getDescribedFunctionTemplate();
+  InstTemplate->setDeducibleClassTemplate(D->getDeducibleClassTemplate());
   InstTemplate->setAccess(D->getAccess());
   assert(InstTemplate &&
          "VisitFunctionDecl/CXXMethodDecl didn't create a template!");
@@ -1256,7 +1257,9 @@ TemplateDeclInstantiator::VisitFunctionTemplateDecl(FunctionTemplateDecl *D) {
     InstTemplate->setInstantiatedFromMemberTemplate(D);
 
   // Make declarations visible in the appropriate context.
-  if (!isFriend) {
+  if (D->isClassTemplateDeducer()) {
+    // ignore these, they are never found through name lookup - they are strange beasts.
+  } else if (!isFriend) {
     Owner->addDecl(InstTemplate);
   } else if (InstTemplate->getDeclContext()->isRecord() &&
              !getPreviousDeclForInstantiation(D)) {
@@ -1451,7 +1454,9 @@ Decl *TemplateDeclInstantiator::VisitFunctionDecl(FunctionDecl *D,
     Function->setLocalExternDecl();
 
   DeclContext *LexicalDC = Owner;
-  if (!isFriend && D->isOutOfLine() && !D->isLocalExternDecl()) {
+  if (FunctionTemplate && FunctionTemplate->isClassTemplateDeducer())
+    LexicalDC = FunctionTemplate->getLexicalDeclContext();
+  else if (!isFriend && D->isOutOfLine() && !D->isLocalExternDecl()) {
     assert(D->getDeclContext()->isFileContext());
     LexicalDC = D->getDeclContext();
   }
@@ -1865,9 +1870,11 @@ TemplateDeclInstantiator::VisitCXXMethodDecl(CXXMethodDecl *D,
       Previous.clear();
   }
 
-  if (!IsClassScopeSpecialization)
-    SemaRef.CheckFunctionDeclaration(nullptr, Method, Previous, false);
-
+  if (!IsClassScopeSpecialization) {
+    FunctionDecl *FDeclByRef = Method;
+    SemaRef.CheckFunctionDeclaration(nullptr, FDeclByRef, Previous, false);
+    assert(FDeclByRef == Method);
+  }
   if (D->isPure())
     SemaRef.CheckPureMethod(Method, SourceRange());
 
@@ -1941,7 +1948,8 @@ Decl *TemplateDeclInstantiator::VisitTemplateTypeParmDecl(
   TemplateTypeParmDecl *Inst =
     TemplateTypeParmDecl::Create(SemaRef.Context, Owner,
                                  D->getLocStart(), D->getLocation(),
-                                 D->getDepth() - TemplateArgs.getNumLevels(),
+                                 D->getDepth() 
+              - TemplateArgs.getAdjustmentForUnsubstitutableTemplateParmeters(),
                                  D->getIndex(), D->getIdentifier(),
                                  D->wasDeclaredWithTypename(),
                                  D->isParameterPack());
@@ -2083,7 +2091,8 @@ Decl *TemplateDeclInstantiator::VisitNonTypeTemplateParmDecl(
     Param = NonTypeTemplateParmDecl::Create(SemaRef.Context, Owner,
                                             D->getInnerLocStart(),
                                             D->getLocation(),
-                                    D->getDepth() - TemplateArgs.getNumLevels(),
+                                    D->getDepth() 
+              - TemplateArgs.getAdjustmentForUnsubstitutableTemplateParmeters(),
                                             D->getPosition(),
                                             D->getIdentifier(), T,
                                             DI,
@@ -2094,7 +2103,8 @@ Decl *TemplateDeclInstantiator::VisitNonTypeTemplateParmDecl(
     Param = NonTypeTemplateParmDecl::Create(SemaRef.Context, Owner,
                                             D->getInnerLocStart(),
                                             D->getLocation(),
-                                    D->getDepth() - TemplateArgs.getNumLevels(),
+                                    D->getDepth() 
+              - TemplateArgs.getAdjustmentForUnsubstitutableTemplateParmeters(),
                                             D->getPosition(),
                                             D->getIdentifier(), T,
                                             D->isParameterPack(), DI);
@@ -2218,14 +2228,16 @@ TemplateDeclInstantiator::VisitTemplateTemplateParmDecl(
   if (IsExpandedParameterPack)
     Param = TemplateTemplateParmDecl::Create(SemaRef.Context, Owner,
                                              D->getLocation(),
-                                   D->getDepth() - TemplateArgs.getNumLevels(),
+                                   D->getDepth() 
+              - TemplateArgs.getAdjustmentForUnsubstitutableTemplateParmeters(),
                                              D->getPosition(),
                                              D->getIdentifier(), InstParams,
                                              ExpandedParams);
   else
     Param = TemplateTemplateParmDecl::Create(SemaRef.Context, Owner,
                                              D->getLocation(),
-                                   D->getDepth() - TemplateArgs.getNumLevels(),
+                                   D->getDepth() 
+              - TemplateArgs.getAdjustmentForUnsubstitutableTemplateParmeters(),
                                              D->getPosition(),
                                              D->isParameterPack(),
                                              D->getIdentifier(), InstParams);
@@ -2419,7 +2431,11 @@ Decl * TemplateDeclInstantiator
                                   D->getUsingLoc(), SS, NameInfo, nullptr,
                                   /*instantiation*/ true,
                                   /*typename*/ false, SourceLocation());
-  if (UD)
+  // FIXME: We need to teach context how to map unresolvedusingvaluedecls to
+  // unresolvedusingvaluedecls (which can occur when making a copy of the class
+  // template pattern when doing template argument deduction through its
+  // ctors/deducers.
+  if (UD && isa<UsingDecl>(UD))
     SemaRef.Context.setInstantiatedFromUsingDecl(cast<UsingDecl>(UD), D);
 
   return UD;
@@ -4170,9 +4186,12 @@ Sema::InstantiateMemInitializers(CXXConstructorDecl *New,
 
 // TODO: this could be templated if the various decl types used the
 // same method name.
-static bool isInstantiationOf(ClassTemplateDecl *Pattern,
+bool isInstantiationOf(ClassTemplateDecl *Pattern,
                               ClassTemplateDecl *Instance) {
   Pattern = Pattern->getCanonicalDecl();
+  
+  while(Pattern->getInstantiatedFromMemberTemplate())
+    Pattern = Pattern->getInstantiatedFromMemberTemplate();
 
   do {
     Instance = Instance->getCanonicalDecl();
@@ -4186,7 +4205,8 @@ static bool isInstantiationOf(ClassTemplateDecl *Pattern,
 static bool isInstantiationOf(FunctionTemplateDecl *Pattern,
                               FunctionTemplateDecl *Instance) {
   Pattern = Pattern->getCanonicalDecl();
-
+  while (Pattern->getInstantiatedFromMemberTemplate())
+    Pattern = Pattern->getInstantiatedFromMemberTemplate();
   do {
     Instance = Instance->getCanonicalDecl();
     if (Pattern == Instance) return true;
@@ -4201,6 +4221,8 @@ isInstantiationOf(ClassTemplatePartialSpecializationDecl *Pattern,
                   ClassTemplatePartialSpecializationDecl *Instance) {
   Pattern
     = cast<ClassTemplatePartialSpecializationDecl>(Pattern->getCanonicalDecl());
+  while (Pattern->getInstantiatedFromMember())
+    Pattern = Pattern->getInstantiatedFromMember();
   do {
     Instance = cast<ClassTemplatePartialSpecializationDecl>(
                                                 Instance->getCanonicalDecl());
@@ -4215,7 +4237,8 @@ isInstantiationOf(ClassTemplatePartialSpecializationDecl *Pattern,
 static bool isInstantiationOf(CXXRecordDecl *Pattern,
                               CXXRecordDecl *Instance) {
   Pattern = Pattern->getCanonicalDecl();
-
+  while (Pattern->getInstantiatedFromMemberClass())
+    Pattern = Pattern->getInstantiatedFromMemberClass();
   do {
     Instance = Instance->getCanonicalDecl();
     if (Pattern == Instance) return true;
@@ -4228,7 +4251,8 @@ static bool isInstantiationOf(CXXRecordDecl *Pattern,
 static bool isInstantiationOf(FunctionDecl *Pattern,
                               FunctionDecl *Instance) {
   Pattern = Pattern->getCanonicalDecl();
-
+  while (Pattern->getInstantiatedFromMemberFunction())
+    Pattern = Pattern->getInstantiatedFromMemberFunction();
   do {
     Instance = Instance->getCanonicalDecl();
     if (Pattern == Instance) return true;
@@ -4241,7 +4265,8 @@ static bool isInstantiationOf(FunctionDecl *Pattern,
 static bool isInstantiationOf(EnumDecl *Pattern,
                               EnumDecl *Instance) {
   Pattern = Pattern->getCanonicalDecl();
-
+  while(Pattern->getInstantiatedFromMemberEnum())
+    Pattern = Pattern->getInstantiatedFromMemberEnum();
   do {
     Instance = Instance->getCanonicalDecl();
     if (Pattern == Instance) return true;
@@ -4405,8 +4430,53 @@ DeclContext *Sema::FindInstantiatedContext(SourceLocation Loc, DeclContext* DC,
 /// (<tt>X<int>::<Kind>::KnownValue</tt>). \p FindInstantiatedDecl performs
 /// this mapping from within the instantiation of <tt>X<int></tt>.
 NamedDecl *Sema::FindInstantiatedDecl(SourceLocation Loc, NamedDecl *D,
-                          const MultiLevelTemplateArgumentList &TemplateArgs) {
+                          const MultiLevelTemplateArgumentList &TemplateArgs,
+                          CXXScopeSpec *TransformedPrecedingScopeSpec) {
   DeclContext *ParentDC = D->getDeclContext();
+  /*
+  {
+    CXXRecordDecl* isSubstitutingIntoClassTemplateDeducerThatContainsDecl(Sema &S,
+                                                              const Decl *D);
+    CXXRecordDecl *ClassUndergoingDeduction = nullptr;
+    if (isa<TemplateDecl>(D) &&
+        (ClassUndergoingDeduction =
+             isSubstitutingIntoClassTemplateDeducerThatContainsDecl(*this,
+                                                                    D))) {
+      // Now get to the actual class pattern, not the invented class pattern we are using to do the deduction.
+      CXXRecordDecl *ActualClassPattern = ClassUndergoingDeduction->getDescribedClassTemplate()->getTemplatedDecl();
+      if (D->getDeclName()) {
+        DeclContext::lookup_result Found = ActualClassPattern->lookup(D->getDeclName());
+        //NamedDecl *Result = findInstantiationOf(Context, D, Found.begin(), Found.end());
+        if (Found.size() == 1) {
+          assert((*Found.begin())->getKind() == D->getKind());
+          return *Found.begin();
+        }
+      }
+    }
+  }
+  */
+  // FIXME: Check if we are substituting into a class template deducer
+  if (isa<TemplateDecl>(D) && CurrentInstantiationScope &&
+      CurrentInstantiationScope->TemplateDecls) {
+    const TemplateDecl *NewD =
+        (*CurrentInstantiationScope->TemplateDecls)[cast<TemplateDecl>(D)];
+    if (NewD) {
+      const CXXRecordDecl *CurParentClass =
+           dyn_cast<CXXRecordDecl>(ParentDC);
+      assert(CurParentClass);
+      const CXXRecordDecl *StashedParentClass =
+          dyn_cast<CXXRecordDecl>(NewD->getDeclContext());
+      auto StashedParentTemplateArgs =
+          getTemplateInstantiationArgs(const_cast<TemplateDecl *>(NewD));
+      // Make sure the templates are the same, that they are member templates,
+      // one is an instantiation of the other? and then compare their arguments,
+      // if the arguments are the same, then we can return the NewDecl,
+      // otherwise return the untrasnformed decl. S.InstantiateClass(
+      // This should always be at depth?
+      return const_cast<TemplateDecl *>(NewD);
+    }
+  }
+
   // FIXME: Parmeters of pointer to functions (y below) that are themselves 
   // parameters (p below) can have their ParentDC set to the translation-unit
   // - thus we can not consistently check if the ParentDC of such a parameter 
@@ -4446,11 +4516,12 @@ NamedDecl *Sema::FindInstantiatedDecl(SourceLocation Loc, NamedDecl *D,
     }
 
     // If we're performing a partial substitution during template argument
-    // deduction, we may not have values for template parameters yet. They
-    // just map to themselves.
+    // deduction, we may not have values for template parameters yet, so
+    // adjust their depth and rebuild (if necessary).
     if (isa<NonTypeTemplateParmDecl>(D) || isa<TemplateTypeParmDecl>(D) ||
         isa<TemplateTemplateParmDecl>(D))
-      return D;
+      return cast_or_null<NamedDecl>(
+          SubstDecl(D, D->getDeclContext(), TemplateArgs));
 
     if (D->isInvalidDecl())
       return nullptr;
@@ -4523,9 +4594,14 @@ NamedDecl *Sema::FindInstantiatedDecl(SourceLocation Loc, NamedDecl *D,
     while (!DC->isFileContext()) {
       // If we're performing substitution while we're inside the template
       // definition, we'll find our own context. We're done.
-      if (DC->Equals(Record))
-        return Record;
+      if (DC->Equals(Record)) {
+        // FIXME: This is because we don't create a class template decl but wire
+        // the cloned template pattern to the original class template
+        //if (ClassTemplate && ClassTemplate->getTemplatedDecl() != Record)
+        //  return ClassTemplate->getTemplatedDecl();
 
+        return Record;
+      }
       if (CXXRecordDecl *InstRecord = dyn_cast<CXXRecordDecl>(DC)) {
         // Check whether we're in the process of instantiating a class template
         // specialization of the template we're mapping.
@@ -4535,7 +4611,18 @@ NamedDecl *Sema::FindInstantiatedDecl(SourceLocation Loc, NamedDecl *D,
           if (ClassTemplate && isInstantiationOf(ClassTemplate, SpecTemplate))
             return InstRecord;
         }
-
+        // During class template argument deduction from its constructors we can
+        // end up with partially substituted class templates.  Such templates
+        // are not represented by ClassTemplateSpecializationDecls but rather as
+        // CXXRecordDecls with their constructors substituted into.  Check to
+        // see if we are an instantiation of the current class template, if so
+        // just return the partially substituted pattern.
+        if (ClassTemplateDecl *SpecTemplate =
+                InstRecord->getDescribedClassTemplate()) {
+          if (ClassTemplate && SpecTemplate &&
+              isInstantiationOf(ClassTemplate, SpecTemplate))
+            return InstRecord;
+        }
         // Check whether we're in the process of instantiating a member class.
         if (isInstantiationOf(Record, InstRecord))
           return InstRecord;
@@ -4560,6 +4647,72 @@ NamedDecl *Sema::FindInstantiatedDecl(SourceLocation Loc, NamedDecl *D,
     return D;
 
   ParentDC = FindInstantiatedContext(Loc, ParentDC, TemplateArgs);
+  {
+    CXXRecordDecl *isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+        Sema & S, const Decl *D);
+    CXXRecordDecl *ClassUndergoingDeduction = nullptr;
+    // If we have a nested name specifier, look into that -
+    if (ParentDC == D->getDeclContext() &&
+        (ClassUndergoingDeduction =
+             isSubstitutingIntoClassTemplateDeducerThatContainsDecl(*this,
+                                                                    D))) {
+      NestedNameSpecifier *NNS = nullptr;
+      if (TransformedPrecedingScopeSpec &&
+          TransformedPrecedingScopeSpec->isValid() &&
+          (NNS = TransformedPrecedingScopeSpec->getScopeRep())) {
+        if (CXXRecordDecl *RD = NNS->getAsRecordDecl())
+          ParentDC = RD;
+        else if (const Type *Ty = NNS->getAsType()) {
+          if (RD = Ty->getAsCXXRecordDecl())
+            ParentDC = RD;
+        }
+      } else {
+        // Get the arguments that are meant for the class template undergoing
+        // deduction.
+        ClassTemplateDecl *ClassTemplateUndergoingDeduction =
+            ClassUndergoingDeduction->getDescribedClassTemplate();
+        assert(ClassTemplateUndergoingDeduction);
+        TemplateParameterList *ClassTPL =
+            ClassTemplateUndergoingDeduction->getTemplateParameters();
+        ArrayRef<TemplateArgument>
+        getTemplateArgumentListBeingSubstitutedIntoClassTemplateDeducer(
+            Sema & S, const DeclContext *D);
+        /*
+        std::pair<ArrayRef<TemplateArgument>, ArrayRef<TemplateArgument>>
+        splitTemplateArgumentListIntoClassAndMemberTemplateArguments(
+            ArrayRef<TemplateArgument> DeducedArgs,
+            const unsigned NumClassTemplateParams);
+        auto TwoLevelArgs =
+            splitTemplateArgumentListIntoClassAndMemberTemplateArguments(
+                getTemplateArgumentListBeingSubstitutedIntoClassTemplateDeducer(
+                    *this, ClassUndergoingDeduction),
+                ClassTPL->size());
+        */
+
+        void addTrivialLocationInfoToTemplateArguments(
+            Sema & S, const TemplateArgumentList *TAL,
+            const unsigned NumTemplateArgsToUse,
+            const TemplateParameterList *ClassTPL,
+            SourceLocation LocToUseForAllLocs, TemplateArgumentListInfo &TALI);
+        TemplateArgumentListInfo TALI(Loc, Loc);
+        auto TemplateArgs =
+            getTemplateArgumentListBeingSubstitutedIntoClassTemplateDeducer(
+                *this, ClassUndergoingDeduction);
+        TemplateArgumentList TAL(TemplateArgumentList::OnStack,
+                                 TemplateArgs.data(), TemplateArgs.size());
+        addTrivialLocationInfoToTemplateArguments(*this, &TAL, ClassTPL->size(),
+                                                  ClassTPL, Loc, TALI);
+        QualType ClassUndergoingDeductionTST = CheckTemplateIdType(
+            TemplateName(ClassTemplateUndergoingDeduction), Loc, TALI);
+        if (!ClassUndergoingDeductionTST.isNull() &&
+            !ClassUndergoingDeductionTST->isDependentType()) {
+          CXXRecordDecl *RD = ClassUndergoingDeductionTST->getAsCXXRecordDecl();
+          assert(RD);
+          ParentDC = RD;
+        }
+      }
+    }
+  }
   if (!ParentDC)
     return nullptr;
 

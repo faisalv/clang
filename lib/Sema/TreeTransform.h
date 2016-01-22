@@ -401,7 +401,10 @@ public:
   /// By default, acts as the identity function on declarations, unless the
   /// transformer has had to transform the declaration itself. Subclasses
   /// may override this function to provide alternate behavior.
-  Decl *TransformDecl(SourceLocation Loc, Decl *D) {
+  /// if SS is provided, we are transforming a nested name specifier, and it represents
+  /// the SS we have transformed so far.
+  Decl *TransformDecl(SourceLocation Loc, Decl *D,
+                      CXXScopeSpec *TransformedPrecedingSS = nullptr) {
     llvm::DenseMap<Decl *, Decl *>::iterator Known
       = TransformedLocalDecls.find(D);
     if (Known != TransformedLocalDecls.end())
@@ -626,8 +629,21 @@ public:
   ExprResult TransformCXXNamedCastExpr(CXXNamedCastExpr *E);
 
   TemplateParameterList *TransformTemplateParameterList(
-        TemplateParameterList *TPL) {
-    return TPL;
+        TemplateParameterList *TPL) {  
+    unsigned N = TPL->size();
+    SmallVector<NamedDecl *, 10> Params;
+    Params.reserve(N);
+    bool Invalid = false;
+    for (auto &P : *TPL) {
+      NamedDecl *D = cast_or_null<NamedDecl>(
+          getDerived().TransformDecl(P->getLocation(), P));
+      Params.push_back(D);
+      Invalid = Invalid || !D || D->isInvalidDecl();
+    }
+    if (Invalid) return nullptr;
+    return TemplateParameterList::Create(SemaRef.Context, TPL->getTemplateLoc(),
+                                         TPL->getLAngleLoc(), llvm::makeArrayRef(Params.data(),
+                                         Params.size()), TPL->getRAngleLoc());
   }
 
   ExprResult TransformAddressOfOperand(Expr *E);
@@ -848,10 +864,23 @@ public:
   /// \brief Build a new C++11 auto type.
   ///
   /// By default, builds a new AutoType with the given deduced type.
-  QualType RebuildAutoType(QualType Deduced, AutoTypeKeyword Keyword) {
-    // Note, IsDependent is always false here: we implicitly convert an 'auto'
-    // which has been deduced to a dependent type into an undeduced 'auto', so
-    // that we'll retry deduction after the transformation.
+  QualType RebuildAutoType(QualType Deduced, AutoTypeKeyword Keyword,
+        TemplateName NewTN, const ASTTemplateArgumentListInfo *NewExplicitArgs) {
+    // Note, unless we are (ab)using auto to represent a template-class whose
+    // tempalte arguments will be deduced from a constructor call,
+    // IsDependent is always false: we implicitly convert an 'auto' which has
+    // been deduced to a dependent type into an undeduced 'auto', so that we'll
+    // retry deduction after the transformation.
+    if (Keyword == AutoTypeKeyword::TypeTemplateDeclRequiringDeduction) {
+      // assert(Deduced->getAs<InjectedClassNameType>()); Make this dependent if
+      // either we are still in a dependent context (it's easier to leave it
+      // dependent if the intializer is dependent, or if init is not, make it a
+      // non-dependent template specialization type during deduction).
+
+      return SemaRef.Context.getAutoTemplateType(
+          NewTN, SemaRef.CurContext->isDependentContext(),
+          const_cast<ASTTemplateArgumentListInfo *>(NewExplicitArgs));
+    }
     return SemaRef.Context.getAutoType(Deduced, Keyword,
                                        /*IsDependent*/ false);
   }
@@ -3547,7 +3576,8 @@ TreeTransform<Derived>::TransformTemplateName(CXXScopeSpec &SS,
   if (TemplateDecl *Template = Name.getAsTemplateDecl()) {
     TemplateDecl *TransTemplate
       = cast_or_null<TemplateDecl>(getDerived().TransformDecl(NameLoc,
-                                                              Template));
+                                                              Template,
+                                                              &SS));
     if (!TransTemplate)
       return TemplateName();
 
@@ -4601,6 +4631,25 @@ ParmVarDecl *TreeTransform<Derived>::TransformFunctionTypeParam(
                                              /* DefArg */ nullptr);
   newParm->setScopeInfo(OldParm->getFunctionScopeDepth(),
                         OldParm->getFunctionScopeIndex() + indexAdjustment);
+  if (OldParm->hasUninstantiatedDefaultArg()) {
+    Expr *Arg = OldParm->getUninstantiatedDefaultArg();
+    newParm->setUninstantiatedDefaultArg(Arg);
+  } else if (OldParm->hasUnparsedDefaultArg()) {
+    llvm_unreachable("How do we get an unparsed default arg when "
+                     "transforming parameters here");
+
+  } else if (Expr *Arg = OldParm->getDefaultArg()) {
+    FunctionDecl *OwningFunc = cast<FunctionDecl>(OldParm->getDeclContext());
+    if (OwningFunc->isLexicallyWithinFunctionOrMethod()) {
+      // FIXME: Instantiate default arguments for methods of local classes
+      // (DR1484) and non-defining declarations.
+    } else {
+      // FIXME: if we non-lazily instantiated non-dependent default args for
+      // non-dependent parameter types we could remove a bunch of duplicate
+      // conversion warnings for such arguments.
+      newParm->setUninstantiatedDefaultArg(Arg);
+    }
+  }
   return newParm;
 }
 
@@ -4894,7 +4943,7 @@ template<typename Derived>
 bool TreeTransform<Derived>::TransformExceptionSpec(
     SourceLocation Loc, FunctionProtoType::ExceptionSpecInfo &ESI,
     SmallVectorImpl<QualType> &Exceptions, bool &Changed) {
-  assert(ESI.Type != EST_Uninstantiated && ESI.Type != EST_Unevaluated);
+  assert(ESI.Type != EST_Uninstantiated); // && ESI.Type != EST_Unevaluated);
 
   // Instantiate a dynamic noexcept expression, if any.
   if (ESI.Type == EST_ComputedNoexcept) {
@@ -5182,11 +5231,60 @@ QualType TreeTransform<Derived>::TransformAutoType(TypeLocBuilder &TLB,
     if (NewDeduced.isNull())
       return QualType();
   }
+  // Is this an auto type that houses a template decl that needs to have its
+  // arguments deduced.
+#if 0
+  TemplateDecl *OldTDecl = T->getTemplateDecl();
+  TemplateDecl *NewTDecl =
+      OldTDecl ? cast<TemplateDecl>(
+                     getDerived().TransformDecl(TL.getBeginLoc(), OldTDecl))
+               : nullptr;
+  if (dyn_cast_or_null<TemplateTemplateParmDecl>(OldTDecl)) {
+    /*
+    TemplateParameterList *OldTPL = OldTDecl->getTemplateParameters();
+    // Only do this if OldTPL has any default arguments which we need to
+    // inherit.
+    TemplateParameterList *NewTPL =
+        getDerived().TransformTemplateParameterList(OldTPL);
+        */
+    int break_now = 0;
+  }
+  TemplateName NewTemplateName(NewTDecl);
+#else
+  TemplateName OldTemplateName = T->getTemplateName();
+  CXXScopeSpec SS;
+  TemplateName NewTemplateName =
+      OldTemplateName.isNull()
+          ? TemplateName()
+          : getDerived().TransformTemplateName(SS, OldTemplateName, TL.getNameLoc());
+#endif
 
+  // Transform Any explicitArgs if this is a autotype housing a template decl
+  // that needs to have its arguments deduced.
+  const ASTTemplateArgumentListInfo *NewExplicitArgs = nullptr;
+  const ASTTemplateArgumentListInfo *OldExplicitArgs = T->getExplicitArgs();
+  if (OldExplicitArgs) {
+
+    TemplateArgumentListInfo NewTALI(OldExplicitArgs->LAngleLoc,
+                                     OldExplicitArgs->RAngleLoc);
+    if (!getDerived()
+             .TransformTemplateArguments(OldExplicitArgs->getTemplateArgs(),
+                                         OldExplicitArgs->getTemplateArgs() +
+                                             OldExplicitArgs->NumTemplateArgs,
+                                         NewTALI)) {
+      NewExplicitArgs =
+          ASTTemplateArgumentListInfo::Create(getSema().Context, NewTALI);
+    }
+  }
   QualType Result = TL.getType();
+
   if (getDerived().AlwaysRebuild() || NewDeduced != OldDeduced ||
-      T->isDependentType()) {
-    Result = getDerived().RebuildAutoType(NewDeduced, T->getKeyword());
+      T->isDependentType() ||
+      T->getTemplateDecl() != (NewTemplateName.isNull()
+                                   ? nullptr
+                                   : NewTemplateName.getAsTemplateDecl())) {
+    Result = getDerived().RebuildAutoType(NewDeduced, T->getKeyword(), NewTemplateName,
+                                          NewExplicitArgs);
     if (Result.isNull())
       return QualType();
   }
@@ -7973,11 +8071,22 @@ TreeTransform<Derived>::TransformDeclRefExpr(DeclRefExpr *E) {
       return ExprError();
   }
 
-  if (!getDerived().AlwaysRebuild() &&
-      QualifierLoc == E->getQualifierLoc() &&
-      ND == E->getDecl() &&
-      NameInfo.getName() == E->getDecl()->getDeclName() &&
-      !E->hasExplicitTemplateArgs()) {
+  if (!getDerived().AlwaysRebuild() && QualifierLoc == E->getQualifierLoc() &&
+      ND == E->getDecl() && NameInfo.getName() == E->getDecl()->getDeclName() &&
+      !E->hasExplicitTemplateArgs() &&
+      (!isa<CXXMethodDecl>(ND) ||
+       !cast<CXXMethodDecl>(ND)->getReturnType()->isUndeducedType()) &&
+      getSema().Context.hasSameType(E->getType(), ND->getType())) {
+
+    // FIXME: The above check for an undeduced return type check should 
+    // be embedded somewhere in Sema - not leak into the transformer.
+    // If a member function with an auto return type is referenced within a
+    // constructor of a class template that is undergoing class template
+    // deduction in a manner that requires its type to be determined, we don't
+    // actually determine the type until all template instantiation arguments
+    // are non-dependent (unlike when we are doing other transformations for
+    // class template deducers).
+    // Above, we check whether the type of the declrefexpr is the same as the decl, because if the decl has its return type previously deduced, then we need to rebuild the declrefexpr.
 
     // Mark it referenced in the new context regardless.
     // FIXME: this is a bit instantiation-specific.

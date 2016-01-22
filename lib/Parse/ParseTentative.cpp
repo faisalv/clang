@@ -1157,9 +1157,32 @@ Parser::isCXXDeclarationSpecifier(Parser::TPResult BracedCastResult,
       case ANK_TentativeDecl:
         return TPResult::False;
       case ANK_TemplateName:
-        // A bare type template-name which can't be a template template
-        // argument is an error, and was probably intended to be a type.
+        // There is a terrible hack for __is_pod to be compatible w GCC that
+        // allows it to operate as a keyword expect when delcaring a template
+        // with struct - work around it, and if it is found followed by a '('
+        // prefer to treat is as the trait, that is, it can not be a
+        // declaration.
+
+        if (Tok.getIdentifierInfo()->isStr("__is_pod") && Next.is(tok::l_paren))
+          return TPResult::False;
+        // If we have a template name followed by ( then we are doing
+        // template argument deduction for the class template through its
+        // constructors.
+        // template<class T> struct X { X(T); };
+        // X (x); <-decl, 
+        
+        // NOTE: we do not allow (X), that is it can not be used as a cast
+        // expression, except for a function cast.
+        if (/*IsTemplateCtorDeductionEnabled && */ Next.is(tok::l_paren))                                                        
+          return TPResult::Ambiguous;
+        // X{x} <- expr
+        if (/*IsTemplateCtorDeductionEnabled && */ Next.is(tok::l_brace))                                               
+          return BracedCastResult;
+
+        // A bare type template-name which can't be a template template argument
+        // is an error, and was probably intended to be a type.
         return GreaterThanIsOperator ? TPResult::True : TPResult::False;
+        
       case ANK_Unresolved:
         return HasMissingTypename ? TPResult::Ambiguous : TPResult::False;
       case ANK_Success:

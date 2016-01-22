@@ -178,6 +178,11 @@ class ASTContext : public RefCountedBase<ASTContext> {
   llvm::DenseMap<const FunctionDecl*, FunctionDecl*>
     ClassScopeSpecializationPattern;
 
+  /// \brief Mapping from a class template to its canonical deduction functions
+  llvm::DenseMap<const ClassTemplateDecl *,
+                 llvm::SmallPtrSet<FunctionTemplateDecl *, 8>>
+      CanonicalClassTemplateDeducers;
+
   /// \brief Mapping from materialized temporaries with static storage duration
   /// that appear in constant initializers to their evaluated values.  These are
   /// allocated in a std::map because their address must be stable.
@@ -782,6 +787,12 @@ public:
   void setClassScopeSpecializationPattern(FunctionDecl *FD,
                                           FunctionDecl *Pattern);
 
+  void addClassTemplateDeducer(const ClassTemplateDecl *CTD,
+                                FunctionTemplateDecl *FTD);
+
+  const llvm::SmallPtrSet<FunctionTemplateDecl *, 8> &
+  getClassTemplateDeducers(const ClassTemplateDecl *CTD);
+
   /// \brief Note that the static data member \p Inst is an instantiation of
   /// the static data member template \p Tmpl of a class template.
   void setInstantiatedFromStaticDataMember(VarDecl *Inst, VarDecl *Tmpl,
@@ -1306,6 +1317,10 @@ public:
   /// \brief C++11 deduced auto type.
   QualType getAutoType(QualType DeducedType, AutoTypeKeyword Keyword,
                        bool IsDependent) const;
+
+  QualType
+  getAutoTemplateType(TemplateName TN, bool IsDependent,
+                          ASTTemplateArgumentListInfo *ExplicitArgs) const;
 
   /// \brief C++11 deduction pattern for 'auto' type.
   QualType getAutoDeductType() const;

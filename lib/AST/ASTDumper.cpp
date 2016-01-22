@@ -1099,6 +1099,9 @@ void ASTDumper::VisitIndirectFieldDecl(const IndirectFieldDecl *D) {
 void ASTDumper::VisitFunctionDecl(const FunctionDecl *D) {
   dumpName(D);
   dumpType(D->getType());
+  auto &Context = D->getASTContext();
+  OS << ":";
+  dumpType(Context.getCanonicalType(D->getType()));
 
   StorageClass SC = D->getStorageClass();
   if (SC != SC_None)
@@ -1172,6 +1175,10 @@ void ASTDumper::VisitFieldDecl(const FieldDecl *D) {
 void ASTDumper::VisitVarDecl(const VarDecl *D) {
   dumpName(D);
   dumpType(D->getType());
+  auto &Context = D->getASTContext();
+  OS << ":";
+  dumpType(Context.getCanonicalType(D->getType()));
+
   StorageClass SC = D->getStorageClass();
   if (SC != SC_None)
     OS << ' ' << VarDecl::getStorageClassSpecifierString(SC);
@@ -1372,15 +1379,22 @@ void ASTDumper::VisitTemplateTypeParmDecl(const TemplateTypeParmDecl *D) {
   if (D->isParameterPack())
     OS << " ...";
   dumpName(D);
+  auto &Context = D->getASTContext();
+  OS << ":";
+  dumpType(Context.getCanonicalType(Context.getTypeDeclType(D)));
   if (D->hasDefaultArgument())
     dumpTemplateArgument(D->getDefaultArgument());
 }
 
 void ASTDumper::VisitNonTypeTemplateParmDecl(const NonTypeTemplateParmDecl *D) {
   dumpType(D->getType());
+  auto &Context = D->getASTContext();
+  OS << ":";
+  dumpType(Context.getCanonicalType(D->getType()));
   if (D->isParameterPack())
     OS << " ...";
   dumpName(D);
+  OS << ":<" << D->getDepth() << "-" << D->getIndex() << ">";
   if (D->hasDefaultArgument())
     dumpTemplateArgument(D->getDefaultArgument());
 }
@@ -1791,6 +1805,9 @@ void ASTDumper::VisitDeclRefExpr(const DeclRefExpr *Node) {
 
   OS << " ";
   dumpBareDeclRef(Node->getDecl());
+  const Decl *D = Node->getDecl();
+  if (isa<NonTypeTemplateParmDecl>(D))
+    dumpDecl(D);
   if (Node->getDecl() != Node->getFoundDecl()) {
     OS << " (";
     dumpBareDeclRef(Node->getFoundDecl());

@@ -2561,7 +2561,9 @@ private:
                                SourceLocation TemplateKWLoc,
                                UnqualifiedId &TemplateName,
                                bool AllowTypeAnnotation = true);
-  void AnnotateTemplateIdTokenAsType();
+  // AllowPartialTemplateId - means we will use template argument deduction
+  // against constructors to extend the template argument list.
+  void AnnotateTemplateIdTokenAsType(bool AllowPartialTemplateId = false);
   bool IsTemplateArgumentList(unsigned Skip = 0);
   bool ParseTemplateArgumentList(TemplateArgList &TemplateArgs);
   ParsedTemplateArgument ParseTemplateTemplateArgument();

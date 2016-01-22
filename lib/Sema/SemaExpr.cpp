@@ -1707,6 +1707,21 @@ Sema::BuildDeclRefExpr(ValueDecl *D, QualType Ty, ExprValueKind VK,
                                         : NestedNameSpecifierLoc(),
                             SourceLocation(), D, RefersToCapturedVariable,
                             NameInfo, Ty, VK, FoundD);
+
+    CXXRecordDecl* isSubstitutingIntoClassTemplateDeducerThatContainsDecl(Sema & S,
+                                                                const Decl *D);
+    // If this declrefexpr refers to a decl that is contained within the class
+    // undergoing class template deduction, and the decl itself is not type
+    // dependent, then make sure the expression itself is not deemed dependent,
+    // just because it is contained within what is thought to be a dependent
+    // context.
+    if (!E->isTypeDependent() && E->isInstantiationDependent() &&
+        isSubstitutingIntoClassTemplateDeducerThatContainsDecl(*this, D)) {
+      if (!E->isTypeDependent()) {
+        E->setInstantiationDependent(false);
+        E->setValueDependent(false);
+      }
+    }
   }
 
   MarkDeclRefReferenced(E);
@@ -2733,6 +2748,25 @@ static bool CheckDeclInExpr(Sema &S, SourceLocation Loc, NamedDecl *D) {
   return false;
 }
 
+bool isContextThatOfConstructorDeducerUndergoingArgumentSubstitution(
+    Sema &S, DeclContext *D) {
+  if (!D)
+    return false;
+  const SmallVectorImpl<Sema::ActiveTemplateInstantiation> &Instantiations =
+      S.ActiveTemplateInstantiations;
+  if (!Instantiations.size())
+    return false;
+  for (unsigned I = Instantiations.size(); I--;) {
+    if (Instantiations[I].Kind ==
+            Sema::ActiveTemplateInstantiation::
+                DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer &&
+        cast<FunctionTemplateDecl>(Instantiations[I].Entity)
+                ->getTemplatedDecl() == dyn_cast<Decl>(D))
+      return true;
+  }
+  return false;
+}
+
 ExprResult Sema::BuildDeclarationNameExpr(const CXXScopeSpec &SS,
                                           LookupResult &R, bool NeedsADL,
                                           bool AcceptInvalidDecl) {
@@ -2761,6 +2795,15 @@ ExprResult Sema::BuildDeclarationNameExpr(const CXXScopeSpec &SS,
                                    R.getLookupNameInfo(),
                                    NeedsADL, R.isOverloadedResult(),
                                    R.begin(), R.end());
+  if (isContextThatOfConstructorDeducerUndergoingArgumentSubstitution(
+          *this, CurContext)) {
+    if (ULE->isTypeDependent()) {
+      ULE->setType(Context.OverloadTy);
+      ULE->setTypeDependent(false);
+      ULE->setValueDependent(false);
+      ULE->setInstantiationDependent(false);
+    }
+  }
 
   return ULE;
 }
@@ -5032,6 +5075,11 @@ Sema::ActOnCallExpr(Scope *S, Expr *Fn, SourceLocation LParenLoc,
     // FIXME: Will need to cache the results of name lookup (including ADL) in
     // Fn.
     bool Dependent = false;
+    // FIXME: Check if 'Fn' is type dependent, and if the overloaded functions
+    // within the unresolvedlookupexpr are contained within the class template
+    // undergoing argument deduction, and if so, fix the type of this expr as
+    // OverloadTy, and have it go through overload resolution and resolve its
+    // type.
     if (Fn->isTypeDependent())
       Dependent = true;
     else if (Expr::hasAnyTypeDependentArguments(ArgExprs))

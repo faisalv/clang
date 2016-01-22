@@ -44,11 +44,16 @@ namespace PR5925 {
 
 namespace PR13210 {
   template <class T>
-  class C {}; // expected-note {{here}}
+  class C {}; // expected-note 3{{candidate}}
 
+  template<class U> struct A { 
+    template<class T = U> struct C2 { C2(...); };
+  };
   void f() {
-    new C(); // expected-error {{requires template arguments}}
+    new C(); // expected-error {{missing template arguments}}
+    new A<int*>::C2(3);
   }
+  
 }
 
 // Don't emit spurious messages

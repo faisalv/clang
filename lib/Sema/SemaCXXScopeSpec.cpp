@@ -84,7 +84,56 @@ DeclContext *Sema::computeDeclContext(const CXXScopeSpec &SS,
     // instantiation, return its DeclContext.
     if (CXXRecordDecl *Record = getCurrentInstantiationOf(NNS))
       return Record;
+    // Check if ActiveInstantiation is in the process of substituting
+    // into a class template constructor deducer, and if so determine the
+    // appropriate decl context. assert that all the template arguments must be
+    // non-dependent, and that the CurContext is a function template pattern
+    // (unless we are substituting into default template arguments - via
+    // SubstDefaultTemplateArgumentIfAvailable, then it is the container 
+    // class undergoing class template deduction)
+    // Then return the class as the decl context for us to delve into and tweak
+    // instantiate class template specialization to deal with appropriately
+    // dealing with the tempalte arguments and splitting them up appropriately
+    // into their levels.
+    if (!EnteringContext) {
+      CXXRecordDecl* isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+          Sema & S, const Decl *D);
+      const TemplateSpecializationType *TSTType =
+          dyn_cast_or_null<TemplateSpecializationType>(NNS->getAsType());
+      const RecordType *RecType =
+          TSTType ? nullptr : dyn_cast_or_null<RecordType>(NNS->getAsType());
+      if (!TSTType && !RecType) return nullptr;
+      
+      ClassTemplateDecl *MemberClassTemplate =
+          dyn_cast_or_null<ClassTemplateDecl>(TSTType ?
+              TSTType->getTemplateName().getAsTemplateDecl() : nullptr);
+      if (!MemberClassTemplate &&!RecType)
+        return nullptr;
 
+      if (isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+              *this, MemberClassTemplate
+                         ? MemberClassTemplate->getTemplatedDecl()
+                         : RecType->getAsTagDecl())) {
+        if (RecType)
+          return RecType->getAsTagDecl();
+        void *InsertPos = nullptr;
+        ClassTemplateSpecializationDecl *CTSD = MemberClassTemplate->findSpecialization(
+            ArrayRef<TemplateArgument>(TSTType->getArgs(),
+                                       TSTType->getNumArgs()),
+            InsertPos);
+        if (CTSD) return CTSD;
+        CTSD =  ClassTemplateSpecializationDecl::Create(
+            Context, MemberClassTemplate->getTemplatedDecl()->getTagKind(),
+            MemberClassTemplate->getDeclContext(),
+            MemberClassTemplate->getLocStart(),
+            MemberClassTemplate->getLocation(), MemberClassTemplate,
+            TSTType->getArgs(), TSTType->getNumArgs(), nullptr);
+        MemberClassTemplate->AddSpecialization(CTSD, InsertPos);
+        return CTSD;
+        //return const_cast<CXXRecordDecl *>(
+        //    MemberClassTemplate->getTemplatedDecl());
+      }
+    }
     if (EnteringContext) {
       const Type *NNSType = NNS->getAsType();
       if (!NNSType) {
@@ -178,7 +227,8 @@ CXXRecordDecl *Sema::getCurrentInstantiationOf(NestedNameSpecifier *NNS) {
   QualType T = QualType(NNS->getAsType(), 0);
   return ::getCurrentInstantiationOf(T, CurContext);
 }
-
+CXXRecordDecl* isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+    Sema &S, const Decl *D);
 /// \brief Require that the context specified by SS be complete.
 ///
 /// If SS refers to a type, this routine checks whether the type is
@@ -194,10 +244,20 @@ bool Sema::RequireCompleteDeclContext(CXXScopeSpec &SS,
 
   TagDecl *tag = dyn_cast<TagDecl>(DC);
 
-  // If this is a dependent type, then we consider it complete.
-  if (!tag || tag->isDependentContext())
+  // If this is a dependent type, then we consider it complete, except if we
+  // need to dig into a member template class or member class of a class
+  // undergoing deduction
+  const bool IsMemberOfClassTemplateUndergoingDeduction = [tag] (Sema &S) {
+    if (tag) 
+      return !!isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+           S, tag);
     return false;
+  }(*this);
 
+  if (!tag || tag->isDependentContext()) {
+    if (!IsMemberOfClassTemplateUndergoingDeduction)
+      return false;
+  }
   // If we're currently defining this type, then lookup into the
   // type is okay: don't complain that it isn't complete yet.
   QualType type = Context.getTypeDeclType(tag);
@@ -496,7 +556,14 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
     if (!LookupCtx->isDependentContext() &&
         RequireCompleteDeclContext(SS, LookupCtx))
       return true;
-
+    // If we have a dependent class - make sure it is not contained within a
+    // class template undergoing deduction, if it is complete it - because we
+    // should have the information to complete it.
+    if (LookupCtx->isDependentContext() &&
+        isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+            *this, dyn_cast<Decl>(LookupCtx)) &&
+        RequireCompleteDeclContext(SS, LookupCtx))
+      return true;
     LookupQualifiedName(Found, LookupCtx);
 
     if (!ObjectType.isNull() && Found.empty()) {

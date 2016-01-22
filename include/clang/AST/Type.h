@@ -74,6 +74,7 @@ namespace llvm {
 
 namespace clang {
   class ASTContext;
+  struct ASTTemplateArgumentListInfo;
   class TypedefNameDecl;
   class TemplateDecl;
   class TemplateTypeParmDecl;
@@ -1217,7 +1218,10 @@ enum class AutoTypeKeyword {
   /// \brief decltype(auto)
   DecltypeAuto,
   /// \brief __auto_type (GNU extension)
-  GNUAutoType
+  GNUAutoType,
+  /// \brief could be a ClassTemplateDecl, AliasTemplateDecl or
+  /// TemplateTemplateParmDecl
+  TypeTemplateDeclRequiringDeduction
 };
 
 /// The base class of the type hierarchy.
@@ -3922,13 +3926,26 @@ class AutoType : public Type, public llvm::FoldingSetNode {
            /*VariablyModified=*/false,
            /*ContainsParameterPack=*/DeducedType.isNull()
                ? false : DeducedType->containsUnexpandedParameterPack()) {
-    assert((DeducedType.isNull() || !IsDependent) &&
+    assert((DeducedType.isNull() || !IsDependent ||
+            Keyword == AutoTypeKeyword::TypeTemplateDeclRequiringDeduction) &&
            "auto deduced to dependent type");
     AutoTypeBits.Keyword = (unsigned)Keyword;
   }
-
+  AutoType(TemplateName TN, bool IsDependent,
+            ASTTemplateArgumentListInfo *ExplicitArgs)
+      : Type(Auto, QualType(this, 0), IsDependent,
+             /*InstantiationDependent*/ IsDependent, /*VariablyModified*/ false,
+             /*ContainsParameterPack*/ false), 
+             Template(TN), ExplicitArgs(ExplicitArgs) {
+    AutoTypeBits.Keyword =
+        (unsigned)AutoTypeKeyword::TypeTemplateDeclRequiringDeduction;
+  }
   friend class ASTContext;  // ASTContext creates these
-
+  //TemplateDecl *TDecl = nullptr;
+  TemplateName Template;
+  ASTTemplateArgumentListInfo *ExplicitArgs = nullptr;
+  // FIXME: Currently the deducible template type is shoe-horned into the
+  // AutoType (just for prototyping purposes) - It should be its own type
 public:
   bool isDecltypeAuto() const {
     return getKeyword() == AutoTypeKeyword::DecltypeAuto;
@@ -3936,7 +3953,29 @@ public:
   AutoTypeKeyword getKeyword() const {
     return (AutoTypeKeyword)AutoTypeBits.Keyword;
   }
-
+  bool isTemplateAuto() const { 
+    return getKeyword() == AutoTypeKeyword::TypeTemplateDeclRequiringDeduction;
+  }
+  TemplateName getTemplateName() const { return Template; }
+  TemplateDecl *getTemplateDecl() const {
+    if (!Template.isNull()) {
+      TemplateName TN = Template;
+      while (auto *SubstTempl = TN.getAsSubstTemplateTemplateParm())
+        TN = SubstTempl->getReplacement();
+      return TN.getAsTemplateDecl();
+    }
+    return nullptr; 
+  }
+  TemplateTemplateParmDecl *getSubstTemplateTemplateDecl() const {
+    if (!Template.isNull())  {
+      if (auto *SubstTempl = Template.getAsSubstTemplateTemplateParm())
+        return SubstTempl->getParameter();
+    }
+    return nullptr;
+  }
+  ASTTemplateArgumentListInfo *getExplicitArgs() const {
+    return ExplicitArgs;
+  }
   bool isSugared() const { return !isCanonicalUnqualified(); }
   QualType desugar() const { return getCanonicalTypeInternal(); }
 
@@ -3950,15 +3989,13 @@ public:
   }
 
   void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getDeducedType(), getKeyword(), isDependentType());
+    Profile(ID, getDeducedType(), getKeyword(), isDependentType(), Template, ExplicitArgs);
   }
 
   static void Profile(llvm::FoldingSetNodeID &ID, QualType Deduced,
-                      AutoTypeKeyword Keyword, bool IsDependent) {
-    ID.AddPointer(Deduced.getAsOpaquePtr());
-    ID.AddInteger((unsigned)Keyword);
-    ID.AddBoolean(IsDependent);
-  }
+                      AutoTypeKeyword Keyword, bool IsDependent,
+                      TemplateName Template,
+                      const ASTTemplateArgumentListInfo *ExplicitArgs);
 
   static bool classof(const Type *T) {
     return T->getTypeClass() == Auto;

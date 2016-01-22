@@ -12891,6 +12891,16 @@ Expr *Sema::FixOverloadedFunctionReference(Expr *E, DeclAccessPair Found,
                                            TemplateArgs);
     MarkDeclRefReferenced(DRE);
     DRE->setHadMultipleCandidates(ULE->getNumDecls() > 1);
+
+    // Make sure DRE is not falsely instantiation dependent.
+    CXXRecordDecl* isSubstitutingIntoClassTemplateDeducerThatContainsDecl(Sema & S,
+                                                                const Decl *D);
+    if (!DRE->isTypeDependent() && DRE->isInstantiationDependent() &&
+        isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+            *this, DRE->getFoundDecl())) {
+      DRE->setInstantiationDependent(false);
+      DRE->setValueDependent(false);
+    }
     return DRE;
   }
 

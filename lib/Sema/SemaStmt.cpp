@@ -3025,8 +3025,20 @@ bool Sema::DeduceFunctionTypeFromReturnExpr(FunctionDecl *FD,
     //   Return type deduction [...] occurs when the definition is
     //   instantiated even if the function body contains a return
     //   statement with a non-type-dependent operand.
-    assert(AT->isDeduced() && "should have deduced to dependent type");
-    return false;
+//    assert(AT->isDeduced() && "should have deduced to dependent type");
+    if (!AT->isDeduced()) {
+      // If a function with a deduced return type requires its type to 
+      // be determined when substituting into class template deducers 
+      // of a class template undergoing deduction from its constructor
+      // arguments - we can end up with the function in a dependent
+      // context, but the AT is not deduced to a dependent type, and
+      // we need the return type to be deduced from the return-expression
+      // which should not be type dependent.
+      CXXRecordDecl* isSubstitutingIntoClassTemplateDeducerThatContainsDecl(
+          Sema & S, const Decl *D);
+      assert(isSubstitutingIntoClassTemplateDeducerThatContainsDecl(*this, FD));
+    } else
+      return false;
   } 
 
   if (RetExpr) {

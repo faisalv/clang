@@ -26,7 +26,7 @@ template<template<class> class M = vector, template<class> class... Metas>
 template<typename ...Types, // expected-error{{template parameter pack must be the last template parameter}}
          int After, int After2>
 struct X0t;
-X0t<int> pr9789();
+X0t<int> pr9789(); //expected-error{{missing template arguments}}
 template<typename ...Types, // expected-error{{template parameter pack must be the last template parameter}}
          int After>
 using A0t = int;

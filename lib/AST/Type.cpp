@@ -1590,6 +1590,31 @@ AutoType *Type::getContainedAutoType() const {
   return GetContainedAutoVisitor().Visit(this);
 }
 
+void AutoType::Profile(llvm::FoldingSetNodeID &ID, QualType Deduced,
+                       AutoTypeKeyword Keyword, bool IsDependent,
+                       TemplateName Template,
+                       const ASTTemplateArgumentListInfo *ExplicitArgs) {
+  ID.AddPointer(Deduced.getAsOpaquePtr());
+  ID.AddInteger((unsigned)Keyword);
+  ID.AddBoolean(IsDependent);
+  if (!Template.isNull()) {
+   Template.Profile(ID);
+  }
+  if (ExplicitArgs) {
+    assert(!Template.isNull() &&
+           "Can only have explicit args if we have a template declaration");
+    ASTContext *Ctx = Template.getAsTemplateDecl()
+                          ? &Template.getAsTemplateDecl()->getASTContext()
+                          : (Template.getAsSubstTemplateTemplateParm()
+                                 ? &Template.getAsSubstTemplateTemplateParm()
+                                        ->getParameter()
+                                        ->getASTContext()
+                                 : nullptr);
+    for (unsigned I = 0; I < ExplicitArgs->NumTemplateArgs; ++I)
+      (*ExplicitArgs)[I].getArgument().Profile(ID, *Ctx);
+  }
+}
+
 bool Type::hasIntegerRepresentation() const {
   if (const VectorType *VT = dyn_cast<VectorType>(CanonicalType))
     return VT->getElementType()->isIntegerType();

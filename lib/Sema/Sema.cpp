@@ -971,6 +971,10 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
   // eliminnated. If it truly cannot be (for example, there is some reentrancy
   // issue I am not seeing yet), then there should at least be a clarifying
   // comment somewhere.
+  const bool IsFatalError =
+      Diags.getDiagnosticLevel(Diags.getCurrentDiagID(),
+                               Diags.getCurrentDiagLoc()) == Diags.Fatal;
+
   if (Optional<TemplateDeductionInfo*> Info = isSFINAEContext()) {
     switch (DiagnosticIDs::getDiagnosticSFINAEResponse(
               Diags.getCurrentDiagID())) {
@@ -990,7 +994,12 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
         (*Info)->addSFINAEDiagnostic(DiagInfo.getLocation(),
                        PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
       }
-
+      if (CurDiagnosticInterceptor) {
+        Diagnostic DiagInfo(&Diags);
+        CurDiagnosticInterceptor->SuppressedDiags.emplace_back(
+            DiagInfo.getLocation(),
+            PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
+      }
       Diags.setLastDiagnosticIgnored();
       Diags.Clear();
       return;
@@ -1015,6 +1024,12 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
         (*Info)->addSFINAEDiagnostic(DiagInfo.getLocation(),
                        PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
       }
+      if (CurDiagnosticInterceptor) {
+        Diagnostic DiagInfo(&Diags);
+        CurDiagnosticInterceptor->SuppressedDiags.emplace_back(
+            DiagInfo.getLocation(),
+            PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
+      }
 
       Diags.setLastDiagnosticIgnored();
       Diags.Clear();
@@ -1037,12 +1052,29 @@ void Sema::EmitCurrentDiagnostic(unsigned DiagID) {
         (*Info)->addSuppressedDiagnostic(DiagInfo.getLocation(),
                        PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
       }
+      if (CurDiagnosticInterceptor) {
+        Diagnostic DiagInfo(&Diags);
+        CurDiagnosticInterceptor->SuppressedDiags.emplace_back(
+            DiagInfo.getLocation(),
+            PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
+      }
 
       // Suppress this diagnostic.
       Diags.setLastDiagnosticIgnored();
       Diags.Clear();
       return;
     }
+  }
+  if (CurDiagnosticInterceptor && !IsFatalError) {
+    Diagnostic DiagInfo(&Diags);
+    
+    CurDiagnosticInterceptor->SuppressedDiags.emplace_back(
+        DiagInfo.getLocation(),
+        PartialDiagnostic(DiagInfo, Context.getDiagAllocator()));
+    // Suppress this diagnostic.
+    Diags.setLastDiagnosticIgnored();
+    Diags.Clear();
+    return;
   }
 
   // Set up the context's printing policy based on our current state.

@@ -55,7 +55,15 @@ namespace {
         Unexpanded.push_back(std::make_pair(TL.getTypePtr(), TL.getNameLoc()));
       return true;
     }
-
+    bool VisitSubstTemplateTypeParmTypeLoc(SubstTemplateTypeParmTypeLoc TL) {
+      QualType RepTy = TL.getTypePtr()->getReplacementType();
+      TypeLocBuilder TLB;
+      auto RepTL = TLB.pushTypeSpec(RepTy);
+      return TraverseTypeLoc(RepTL);
+    }
+    bool VisitSubstTemplateTypeParmType(SubstTemplateTypeParmType *T) {
+      return TraverseType(T->getReplacementType());
+    }
     /// \brief Record occurrences of template type parameter packs
     /// when we don't have proper source-location information for
     /// them.

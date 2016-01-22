@@ -90,8 +90,7 @@ DeduceTemplateArguments(Sema &S,
                         TemplateArgument Arg,
                         TemplateDeductionInfo &Info,
                         SmallVectorImpl<DeducedTemplateArgument> &Deduced);
-
-static Sema::TemplateDeductionResult
+Sema::TemplateDeductionResult
 DeduceTemplateArgumentsByTypeMatch(Sema &S,
                                    TemplateParameterList *TemplateParams,
                                    QualType Param,
@@ -373,6 +372,24 @@ DeduceNonTypeTemplateArgument(Sema &S,
   return Sema::TDK_Success;
 }
 
+bool areTemplateDeclsRelated(const TemplateDecl *T1, const TemplateDecl *T2) {
+  if (!T1 || !T2)
+    return false;
+  if (isa<ClassTemplateDecl>(T1) && isa<ClassTemplateDecl>(T2)) {
+    bool isInstantiationOf(ClassTemplateDecl * Pattern,
+                           ClassTemplateDecl * Instance);
+    const ClassTemplateDecl *ParamCTD = cast<ClassTemplateDecl>(T1);
+    const ClassTemplateDecl *ArgCTD   = cast<ClassTemplateDecl>(T2);
+    while (ParamCTD->getInstantiatedFromMemberTemplate()) {
+      // FIXME: Deal with specialized templates
+      ParamCTD = ParamCTD->getInstantiatedFromMemberTemplate();
+    }
+    return isInstantiationOf(const_cast<ClassTemplateDecl *>(ParamCTD),
+                             const_cast<ClassTemplateDecl *>(ArgCTD));
+  }
+  return false;
+}
+
 static Sema::TemplateDeductionResult
 DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
@@ -407,7 +424,53 @@ DeduceTemplateArguments(Sema &S,
   // Verify that the two template names are equivalent.
   if (S.Context.hasSameTemplateName(Param, Arg))
     return Sema::TDK_Success;
+  // When deducing class template arguments, we can end up with member templates
+  // who need their ancestors checked and not just their canonical declarations.
+  //
+  //  template<class T> struct A {
+  //    template<class U, class V> struct B { /*B(U,V) { }*/ };
+  //    template<class U> A(B<T,U>) { }
+  //  };
+  //  A a{A<int*>::B<int*,float*>{}};
+  TemplateDecl *ArgDecl = Arg.getAsTemplateDecl();
+  assert(ArgDecl);
+  /*
+  if (isa<ClassTemplateDecl>(ParamDecl) && isa<ClassTemplateDecl>(ArgDecl)) {
+    bool isInstantiationOf(ClassTemplateDecl *Pattern,
+                           ClassTemplateDecl *Instance);
+    ClassTemplateDecl *ParamCTD = cast<ClassTemplateDecl>(ParamDecl);
+    ClassTemplateDecl *ArgCTD = cast<ClassTemplateDecl>(ArgDecl);
+    while (ParamCTD->getInstantiatedFromMemberTemplate()) {
+      // FIXME: Deal with specialized templates
+      ParamCTD = ParamCTD->getInstantiatedFromMemberTemplate();
+    }
+    if (isInstantiationOf(ParamCTD, ArgCTD))
+      return Sema::TDK_Success;
+  }
+  */
+  
+  if (areTemplateDeclsRelated(ParamDecl, ArgDecl)) {
+    /*
+    if (S.CurrentInstantiationScope->TemplateDecls) {
+      if (ParamDecl->getDeclContext()->isDependentContext()) {
+        
+        //const CXXRecordDecl *ParentClass =
+        //    dyn_cast<CXXRecordDecl>(ParamDecl->getDeclContext());
+        //assert(ParentClass);
+        //auto TemplateArgs = S.getTemplateInstantiationArgs(ArgDecl);
+        //S.InstantiateClass(
+        const TemplateDecl *&SavedArgDecl =
+            (*S.CurrentInstantiationScope->TemplateDecls)[ParamDecl];
+        assert(!SavedArgDecl || SavedArgDecl == ArgDecl);
+        SavedArgDecl = ArgDecl;
 
+        return Sema::TDK_Success;
+      }
+    }
+    */
+    return Sema::TDK_Success;
+  }
+  
   // Mismatch of non-dependent template parameter to argument.
   Info.FirstArg = TemplateArgument(Param);
   Info.SecondArg = TemplateArgument(Arg);
@@ -939,7 +1002,8 @@ bool Sema::isSameOrCompatibleFunctionType(CanQualType Param,
 /// \returns the result of template argument deduction so far. Note that a
 /// "success" result means that template argument deduction has not yet failed,
 /// but it may still fail, later, for other reasons.
-static Sema::TemplateDeductionResult
+//static 
+Sema::TemplateDeductionResult
 DeduceTemplateArgumentsByTypeMatch(Sema &S,
                                    TemplateParameterList *TemplateParams,
                                    QualType ParamIn, QualType ArgIn,
@@ -1089,7 +1153,7 @@ DeduceTemplateArgumentsByTypeMatch(Sema &S,
       return Sema::TDK_Underqualified;
     }
 
-    assert(TemplateTypeParm->getDepth() == 0 && "Can't deduce with depth > 0");
+    //assert(TemplateTypeParm->getDepth() == 0 && "Can't deduce with depth > 0");
     assert(Arg != S.Context.OverloadTy && "Unresolved overloaded function");
     QualType DeducedType = Arg;
 
@@ -1907,7 +1971,8 @@ DeduceTemplateArguments(Sema &S,
   return Sema::TDK_Success;
 }
 
-static Sema::TemplateDeductionResult
+//static 
+Sema::TemplateDeductionResult
 DeduceTemplateArguments(Sema &S,
                         TemplateParameterList *TemplateParams,
                         const TemplateArgumentList &ParamList,
@@ -1921,7 +1986,8 @@ DeduceTemplateArguments(Sema &S,
 }
 
 /// \brief Determine whether two template arguments are the same.
-static bool isSameTemplateArg(ASTContext &Context,
+// static 
+bool isSameTemplateArg(ASTContext &Context,
                               const TemplateArgument &X,
                               const TemplateArgument &Y) {
   if (X.getKind() != Y.getKind())
@@ -1989,14 +2055,15 @@ static bool isSameTemplateArg(ASTContext &Context,
 ///
 /// \param Loc The source location to use for the resulting template
 /// argument.
-static TemplateArgumentLoc
+TemplateArgumentLoc
 getTrivialTemplateArgumentLoc(Sema &S,
                               const TemplateArgument &Arg,
                               QualType NTTPType,
                               SourceLocation Loc) {
   switch (Arg.getKind()) {
   case TemplateArgument::Null:
-    llvm_unreachable("Can't get a NULL template argument here");
+    //llvm_unreachable("Can't get a NULL template argument here");
+    return TemplateArgumentLoc();
 
   case TemplateArgument::Type:
     return TemplateArgumentLoc(Arg,
@@ -2548,12 +2615,12 @@ Sema::SubstituteExplicitTemplateArguments(
   // for this template parameter pack.
   for (unsigned I = 0, N = Builder.size(); I != N; ++I) {
     const TemplateArgument &Arg = Builder[I];
-    if (Arg.getKind() == TemplateArgument::Pack) {
-      CurrentInstantiationScope->SetPartiallySubstitutedPack(
-                                                 TemplateParams->getParam(I),
-                                                             Arg.pack_begin(),
-                                                             Arg.pack_size());
-      break;
+    if (!FunctionTemplate->isClassTemplateDeducer() || !Arg.isDependent()) {
+      if (Arg.getKind() == TemplateArgument::Pack) {
+        CurrentInstantiationScope->SetPartiallySubstitutedPack(
+            TemplateParams->getParam(I), Arg.pack_begin(), Arg.pack_size());
+        break;
+      }
     }
   }
 
@@ -2631,13 +2698,23 @@ Sema::SubstituteExplicitTemplateArguments(
   // the set of deduced template arguments. Explicitly-specified
   // parameter packs, however, will be set to NULL since the deduction
   // mechanisms handle explicitly-specified argument packs directly.
-  Deduced.reserve(TemplateParams->size());
+  Deduced.resize(TemplateParams->size());
+  //Deduced.reserve(TemplateParams->size());
   for (unsigned I = 0, N = ExplicitArgumentList->size(); I != N; ++I) {
     const TemplateArgument &Arg = ExplicitArgumentList->get(I);
+#if 1
+    if (!FunctionTemplate->isClassTemplateDeducer() || !Arg.isDependent()) {
+      if (Arg.getKind() == TemplateArgument::Pack)
+        Deduced[I] = DeducedTemplateArgument();
+      else
+        Deduced[I] = Arg;
+    }
+#else
     if (Arg.getKind() == TemplateArgument::Pack)
       Deduced.push_back(DeducedTemplateArgument());
     else
       Deduced.push_back(Arg);
+#endif
   }
 
   return TDK_Success;
@@ -2741,13 +2818,73 @@ CheckOriginalCallArgDeduction(Sema &S, Sema::OriginalCallArg OriginalArg,
   if (A->isRecordType() && isSimpleTemplateIdType(OriginalParamType) &&
       S.IsDerivedFrom(SourceLocation(), A, DeducedA))
     return false;
-  
+
+  if (auto *DeducedTST = DeducedA->getAs<TemplateSpecializationType>()) {
+    const TemplateSpecializationType *OriginalArgTST =
+        A->getAs<TemplateSpecializationType>();
+    if (!OriginalArgTST) {
+      OriginalArgTST =
+          A->getAs<ElaboratedType>()
+              ? A->getAs<ElaboratedType>()->getAs<TemplateSpecializationType>()
+              : nullptr;
+    }
+    if (OriginalArgTST) {
+      if (areTemplateDeclsRelated(
+              DeducedTST->getTemplateName().getAsTemplateDecl(),
+              OriginalArgTST->getTemplateName().getAsTemplateDecl())) {
+        if (DeducedTST->getNumArgs() == OriginalArgTST->getNumArgs()) {
+          for (unsigned I = 0, E = DeducedTST->getNumArgs(); I != E; ++I) {
+            if (!isSameTemplateArg(S.Context, DeducedTST->getArg(I),
+                                   OriginalArgTST->getArg(I)))
+              return true;
+          }
+          return false;
+        }
+      }
+    }
+  }
   return true;
 }
 
-/// \brief Finish template argument deduction for a function template,
-/// checking the deduced template arguments for completeness and forming
-/// the function template specialization.
+bool isDeducerTemplateOfClassTemplateWhoseArgumentsAreDeduced(
+    const FunctionTemplateDecl *FTD,
+    SmallVectorImpl<DeducedTemplateArgument> *DeducedArgs = nullptr) {
+  if (!FTD->isImplicit())
+    return false;
+  // The parent class must be a dependent template pattern - an implicit
+  // construction.
+  const CXXRecordDecl *ParentClass =
+      dyn_cast<CXXRecordDecl>(FTD->getDeclContext());
+  if (!ParentClass || !ParentClass->isDependentContext() ||
+      !ParentClass->getDescribedClassTemplate() || !ParentClass->isImplicit())
+    return false;
+  
+  // All the template arguments at this level must be non-dependent, and deduced.
+  if (DeducedArgs) {
+    for (auto &&DTA : *DeducedArgs) {
+      if (!DTA.isNull() &&
+          (DTA.isDependent() || DTA.isInstantiationDependent()))
+        return false;
+    }
+  }
+  return true;
+}
+
+FunctionTemplateDecl *isClassTemplateDeducerUndergoingSubstitution(Sema &S) {
+  const SmallVectorImpl<Sema::ActiveTemplateInstantiation> &Instantiations =
+      S.ActiveTemplateInstantiations;
+  if (!Instantiations.size())
+    return false;
+  for (unsigned I = Instantiations.size(); I--;)
+    if (Instantiations[I].Kind ==
+        Sema::ActiveTemplateInstantiation::
+            DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer)
+      return cast<FunctionTemplateDecl>(Instantiations[I].Entity);
+  return nullptr;
+}
+/// \brief Finish template argument deduction for a function template, checking
+/// the deduced template arguments for completeness and forming the function
+/// template specialization.
 ///
 /// \param OriginalCallArgs If non-NULL, the original call arguments against
 /// which the deduced argument types should be compared.
@@ -2766,9 +2903,23 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
   EnterExpressionEvaluationContext Unevaluated(*this, Sema::Unevaluated);
   SFINAETrap Trap(*this);
 
+  std::unique_ptr<InstantiatingTemplate> InstClassTemplateDeducers;
+  SmallVector<TemplateArgument, 4> DeducedArgs(Deduced.begin(), Deduced.end());
+  
+  // If we are finalizing template argument deduction for a class template
+  // deducer, push that information on to the stack.
+  const bool IsDeducerTemplate =
+      isDeducerTemplateOfClassTemplateWhoseArgumentsAreDeduced(FunctionTemplate,
+                                                               &Deduced);
+  if (IsDeducerTemplate)
+    InstClassTemplateDeducers.reset(new InstantiatingTemplate(
+        *this, Info.getLocation(), FunctionTemplate, DeducedArgs,
+        ActiveTemplateInstantiation::
+            DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer,
+        Info));
+
   // Enter a new template instantiation context while we instantiate the
   // actual function declaration.
-  SmallVector<TemplateArgument, 4> DeducedArgs(Deduced.begin(), Deduced.end());
   InstantiatingTemplate Inst(*this, Info.getLocation(), FunctionTemplate,
                              DeducedArgs,
               ActiveTemplateInstantiation::DeducedTemplateArgumentSubstitution,
@@ -2908,7 +3059,17 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
 
     // If we get here, we successfully used the default template argument.
   }
-
+  if (IsDeducerTemplate) {
+    assert(ActiveTemplateInstantiations.size() >= 2);
+    assert(ActiveTemplateInstantiations[ActiveTemplateInstantiations.size() - 2]
+               .Kind ==
+           ActiveTemplateInstantiation::
+               DeducedTemplateArgumentSubstitutionIntoClassTemplateDeducer);
+    ActiveTemplateInstantiations[ActiveTemplateInstantiations.size() - 2]
+        .TemplateArgs = Builder.data();
+    ActiveTemplateInstantiations[ActiveTemplateInstantiations.size() - 2]
+        .NumTemplateArgs = Builder.size();
+  }
   // Form the template argument list from the deduced template arguments.
   TemplateArgumentList *DeducedArgumentList
     = TemplateArgumentList::CreateCopy(Context, Builder.data(), Builder.size());
@@ -2919,9 +3080,106 @@ Sema::FinishTemplateArgumentDeduction(FunctionTemplateDecl *FunctionTemplate,
   DeclContext *Owner = FunctionTemplate->getDeclContext();
   if (FunctionTemplate->getFriendObjectKind())
     Owner = FunctionTemplate->getLexicalDeclContext();
+
+  // When substituting into our template to form our specialized decl, we must
+  // package the deduced arguments into a multi level template argument list.
+  MultiLevelTemplateArgumentList MultiLevelDeducedArgsForSubstitution;
+#if 0
+  // If the Owner is a dependent context that is a CXXRecordDecl, make sure this
+  // function template is implicit and not a constructor itself - thus implying
+  // that it was generated from a constructor for class template argument
+  // deduction.
+  if (Owner->isDependentContext()) {
+
+    assert(isa<CXXRecordDecl>(Owner) && "this was added when deduction of "
+                                        "class template arguments from its "
+                                        "ctors was implemented");
+    assert(FunctionTemplate->isImplicit() &&
+           "class template deduction surrogates must be implicit");
+    assert(!isa<CXXConstructorDecl>(FunctionTemplate->getTemplatedDecl()) &&
+           "These function tempaltes are generated from constructors, but are "
+           "not constructors themselves");
+    CXXRecordDecl *ClassTemplatePattern = cast<CXXRecordDecl>(Owner);
+    ClassTemplateDecl *ClassTemplate =
+        ClassTemplatePattern->getDescribedClassTemplate();
+    assert(ClassTemplate && "FunctionTemplate constructor deducers must be "
+                            "contained within a class template");
+    TemplateParameterList *ClassTPL = ClassTemplate->getTemplateParameters();
+    assert(!ClassTPL->getDepth() &&
+           "The class template's parameter must be at depth 0");
+    // We create two levels for template argument substitution.  If this
+    // function template was generated from a constructor template then we need
+    // to separate the class template parameters (outermost), and the
+    // constructor's tempalte parameters if any (innermost).
+    const unsigned NumClassTemplateParams = ClassTPL->size();
+    const unsigned NumDeducedTemplateParams = DeducedArgumentList->size();
+    /*
+    if (NumDeducedTemplateParams > NumClassTemplateParams) {
+      const unsigned NumInnerCtorTemplateParameters =
+          NumDeducedTemplateParams - NumClassTemplateParams;
+      TemplateArgumentList InnerCtorTemplateArgs(
+          TemplateArgumentList::OnStack,
+          DeducedArgumentList->data() + NumClassTemplateParams,
+          NumInnerCtorTemplateParameters);
+      MultiLevelDeducedArgsForSubstitution.addOuterTemplateArguments(
+          &InnerCtorTemplateArgs);
+      TemplateArgumentList OuterClassTemplateArgs(TemplateArgumentList::OnStack,
+                                                  DeducedArgumentList->data(),
+                                                  NumClassTemplateParams);
+      MultiLevelDeducedArgsForSubstitution.addOuterTemplateArguments(
+          &OuterClassTemplateArgs);
+    } else*/
+      MultiLevelDeducedArgsForSubstitution.addOuterTemplateArguments(
+          DeducedArgumentList);
+  } else {
+    MultiLevelDeducedArgsForSubstitution.addOuterTemplateArguments(
+        DeducedArgumentList);
+  }
+#else
+  if (!IsDeducerTemplate) {
+    const unsigned Depth =
+        FunctionTemplate->getTemplateParameters()->getDepth();
+    FunctionTemplateDecl *ClassTemplateDeducer =
+        isClassTemplateDeducerUndergoingSubstitution(*this);
+    const bool IsDeducerAlreadyUndergoingSubstitution = ClassTemplateDeducer;
+
+    assert(!Depth ||
+           IsDeducerAlreadyUndergoingSubstitution &&
+               "The only way we can do deduction on a template that is not at "
+               "depth 0 is if we are doing class template deduction");
+    MultiLevelDeducedArgsForSubstitution.addOuterTemplateArguments(
+        DeducedArgumentList);
+    if (Depth) {
+      assert(Depth == 1 && "How do we get here with a template at depth deeper than 1");
+      // We are substituing into a template that was called while substituting
+      // into a class template deducer function. for e.g. template<class T> X(T,
+      // decltype(foo());
+      // Add the currently deduced templat arguments
+      ArrayRef<TemplateArgument>
+      getTemplateArgumentListBeingSubstitutedIntoClassTemplateDeducer(
+          Sema & S, const DeclContext *D);
+      std::pair<ArrayRef<TemplateArgument>, ArrayRef<TemplateArgument>>
+      splitTemplateArgumentListIntoClassAndMemberTemplateArguments(
+          ArrayRef<TemplateArgument> DeducedArgs,
+          const unsigned NumClassTemplateParams);
+      auto TwoLevelArgs =
+          splitTemplateArgumentListIntoClassAndMemberTemplateArguments(
+              getTemplateArgumentListBeingSubstitutedIntoClassTemplateDeducer(
+                  *this, ClassTemplateDeducer->getDeclContext()),
+              cast<CXXRecordDecl>(ClassTemplateDeducer->getDeclContext())
+                  ->getDescribedClassTemplate()
+                  ->getTemplateParameters()
+                  ->size());
+      MultiLevelDeducedArgsForSubstitution.addOuterTemplateArguments(
+          TwoLevelArgs.first);
+    }
+  } else
+    MultiLevelDeducedArgsForSubstitution.addOuterTemplateArguments(
+        DeducedArgumentList);
+#endif
   Specialization = cast_or_null<FunctionDecl>(
                       SubstDecl(FunctionTemplate->getTemplatedDecl(), Owner,
-                         MultiLevelTemplateArgumentList(*DeducedArgumentList)));
+                         MultiLevelDeducedArgsForSubstitution));
   if (!Specialization || Specialization->isInvalidDecl())
     return TDK_SubstitutionFailure;
 
@@ -3279,6 +3537,7 @@ DeduceFromInitializerList(Sema &S, TemplateParameterList *TemplateParams,
   return true;
 }
 
+
 /// \brief Perform template argument deduction by matching a parameter type
 ///        against a single expression, where the expression is an element of
 ///        an initializer list that was originally matched against a parameter
@@ -3361,9 +3620,10 @@ Sema::TemplateDeductionResult Sema::DeduceTemplateArguments(
       return TDK_TooManyArguments;
   }
 
+  LocalInstantiationScope::TemplateDeclsMap TemplateDecls;
   // The types of the parameters from which we will perform template argument
   // deduction.
-  LocalInstantiationScope InstScope(*this);
+  LocalInstantiationScope InstScope(*this,/*Combine*/false, &TemplateDecls);
   TemplateParameterList *TemplateParams
     = FunctionTemplate->getTemplateParameters();
   SmallVector<DeducedTemplateArgument, 4> Deduced;
@@ -4147,8 +4407,23 @@ bool Sema::DeduceReturnType(FunctionDecl *FD, SourceLocation Loc,
                             bool Diagnose) {
   assert(FD->getReturnType()->isUndeducedType());
 
-  if (FD->getTemplateInstantiationPattern())
+  if (FunctionDecl *PatternDecl = FD->getTemplateInstantiationPattern()) {
+    // Don't instantiate a function if we do not have all template instantiation
+    // args that are non-dependent. This can happen during class tempalte
+    // argument deduction - especially when we are making copies of template
+    // patterns.
+    if (FD->getDeclContext()->isDependentContext()) {
+      MultiLevelTemplateArgumentList TemplateArgs =
+          getTemplateInstantiationArgs(FD, nullptr, false, PatternDecl);
+      for (unsigned I = 0; I < TemplateArgs.getNumLevels(); ++I) {
+        auto &ArgList = TemplateArgs.getArgList(I);
+        for (auto &&TA : ArgList)
+          if (TA.isDependent() || TA.isInstantiationDependent())
+            return false;
+      }
+    }
     InstantiateFunctionDefinition(Loc, FD);
+  }
 
   bool StillUndeduced = FD->getReturnType()->isUndeducedType();
   if (StillUndeduced && Diagnose && !FD->isInvalidDecl()) {

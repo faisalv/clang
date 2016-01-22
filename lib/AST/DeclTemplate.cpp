@@ -204,9 +204,11 @@ void RedeclarableTemplateDecl::addSpecializationImpl(
 
 /// \brief Generate the injected template arguments for the given template
 /// parameter list, e.g., for the injected-class-name of a class template.
-static void GenerateInjectedTemplateArgs(ASTContext &Context,
+//static 
+void GenerateInjectedTemplateArgs(ASTContext &Context,
                                         TemplateParameterList *Params,
-                                         TemplateArgument *Args) {
+                                         TemplateArgument *Args,
+                                         bool Canonicalize = false) {
   for (TemplateParameterList::iterator Param = Params->begin(),
                                     ParamEnd = Params->end();
        Param != ParamEnd; ++Param) {
@@ -215,7 +217,8 @@ static void GenerateInjectedTemplateArgs(ASTContext &Context,
       QualType ArgType = Context.getTypeDeclType(TTP);
       if (TTP->isParameterPack())
         ArgType = Context.getPackExpansionType(ArgType, None);
-
+      if (Canonicalize)
+        ArgType = Context.getCanonicalType(ArgType);
       Arg = TemplateArgument(ArgType);
     } else if (NonTypeTemplateParmDecl *NTTP =
                dyn_cast<NonTypeTemplateParmDecl>(*Param)) {

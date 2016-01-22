@@ -584,3 +584,12 @@ void ASTTemplateKWAndArgsInfo::copyInto(const TemplateArgumentLoc *ArgArray,
   for (unsigned I = 0; I != NumTemplateArgs; ++I)
     Info.addArgument(ArgArray[I]);
 }
+
+void
+ASTTemplateArgumentListInfo::copyInto(TemplateArgumentListInfo &Info) const {
+  Info.setLAngleLoc(LAngleLoc);
+  Info.setRAngleLoc(RAngleLoc);
+  const TemplateArgumentLoc *ArgArray = getTemplateArgs();
+  for (unsigned I = 0; I != NumTemplateArgs; ++I)
+    Info.addArgument(ArgArray[I]);
+}

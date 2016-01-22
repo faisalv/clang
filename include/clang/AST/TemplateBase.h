@@ -437,7 +437,8 @@ public:
 
   TemplateArgumentLoc(const TemplateArgument &Argument, Expr *E)
     : Argument(Argument), LocInfo(E) {
-    assert(Argument.getKind() == TemplateArgument::Expression);
+    assert(Argument.getKind() == TemplateArgument::Expression ||
+           Argument.getKind() == TemplateArgument::NullPtr);
   }
 
   TemplateArgumentLoc(const TemplateArgument &Argument, 
@@ -592,6 +593,7 @@ public:
 
   static const ASTTemplateArgumentListInfo *
   Create(ASTContext &C, const TemplateArgumentListInfo &List);
+  void copyInto(TemplateArgumentListInfo &List) const;
 };
 
 /// \brief Represents an explicit template argument list in C++, e.g.,
