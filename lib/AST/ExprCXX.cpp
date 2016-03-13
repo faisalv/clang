@@ -882,17 +882,19 @@ CXXConstructExpr::CXXConstructExpr(const ASTContext &C, StmtClass SC,
 LambdaCapture::LambdaCapture(SourceLocation Loc, bool Implicit,
                              LambdaCaptureKind Kind, VarDecl *Var,
                              SourceLocation EllipsisLoc)
-  : DeclAndBits(Var, 0), Loc(Loc), EllipsisLoc(EllipsisLoc)
+  : DeclAndBits(Var, 0), Loc(Loc), EllipsisLoc(EllipsisLoc), IsStarThis(false)
 {
   unsigned Bits = 0;
   if (Implicit)
     Bits |= Capture_Implicit;
   
   switch (Kind) {
+  case LCK_StarThis:
+    IsStarThis = true;
   case LCK_This:
     assert(!Var && "'this' capture cannot have a variable!");
     break;
-
+  
   case LCK_ByCopy:
     Bits |= Capture_ByCopy;
     // Fall through 
@@ -909,9 +911,11 @@ LambdaCapture::LambdaCapture(SourceLocation Loc, bool Implicit,
 
 LambdaCaptureKind LambdaCapture::getCaptureKind() const {
   Decl *D = DeclAndBits.getPointer();
-  bool CapByCopy = DeclAndBits.getInt() & Capture_ByCopy;
+  unsigned Bits = DeclAndBits.getInt();
+  bool CapByCopy = Bits & Capture_ByCopy;
   if (!D)
-    return CapByCopy ? LCK_VLAType : LCK_This;
+    return CapByCopy ? LCK_VLAType
+                     : (IsStarThis ? LCK_StarThis : LCK_This);
 
   return CapByCopy ? LCK_ByCopy : LCK_ByRef;
 }

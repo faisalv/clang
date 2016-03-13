@@ -17,6 +17,7 @@
 #include "clang/AST/DeclTemplate.h"
 #include "clang/AST/ExprCXX.h"
 #include "clang/AST/ExprObjC.h"
+#include "clang/AST/StmtVisitor.h"
 #include "clang/Lex/Preprocessor.h"
 #include "clang/Sema/Lookup.h"
 #include "clang/Sema/Scope.h"
@@ -1122,7 +1123,33 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
   // Check the use of this member.
   if (DiagnoseUseOfDecl(MemberDecl, MemberLoc))
     return ExprError();
+/*
+  // Add const for '* this' capture if not mutable.
+  if (BaseExpr && isLambdaCallOperator(CurContext)) {
+    LambdaScopeInfo *LSI = getCurLambda();
+    assert(LSI);
+    // FIXME: Check if BaseExpr contains 'this'
+    if (LSI->isCXXThisCaptured()) {
+      auto C = LSI->getCXXThisCapture();
+      QualType BaseType = BaseExpr->getType();
+      if (C.isStarThisCapture() && LSI->CallOperator->isConst() &&
+          !BaseType.isConstQualified()) {
+        struct CheckIfBaseExprRefersToThis
+            : ConstStmtVisitor<CheckIfBaseExprRefersToThis, bool> {
+          bool VisitCXXThisExpr(const CXXThisExpr *E) { return true; }
+        };
+        if (CheckIfBaseExprRefersToThis().Visit(BaseExpr->IgnoreParens())) {
+          QualType BasePtrTy = BaseType->getPointeeType();
+          if (!BasePtrTy.isNull()) {
 
+          }
+          BaseType.addConst();
+          BaseExpr->setType(BaseType);
+        }
+      }
+    }
+  }
+*/
   if (FieldDecl *FD = dyn_cast<FieldDecl>(MemberDecl))
     return BuildFieldReferenceExpr(*this, BaseExpr, IsArrow, OpLoc, SS, FD,
                                    FoundDecl, MemberNameInfo);
@@ -1750,6 +1777,24 @@ BuildFieldReferenceExpr(Sema &S, Expr *BaseExpr, bool IsArrow,
   
   // Figure out the type of the member; see C99 6.5.2.3p3, C++ [expr.ref]
   QualType MemberType = Field->getType();
+#if 0
+  if (isLambdaCallOperator(S.CurContext)) {
+    LambdaScopeInfo *LSI = S.getCurLambda();
+    assert(LSI);
+    // FIXME: Check if BaseExpr contains 'this'
+    if (LSI->isCXXThisCaptured()) {
+      auto C = LSI->getCXXThisCapture();
+      if (C.isStarThisCapture() && LSI->CallOperator->isConst()) {
+        struct CheckIfBaseExprRefersToThis
+            : ConstStmtVisitor<CheckIfBaseExprRefersToThis, bool> {
+          bool VisitCXXThisExpr(const CXXThisExpr *E) { return true; }
+        };
+        if (CheckIfBaseExprRefersToThis().Visit(BaseExpr->IgnoreParens()))
+          MemberType.addConst();
+      }
+    }
+  }
+#endif
   if (const ReferenceType *Ref = MemberType->getAs<ReferenceType>()) {
     MemberType = Ref->getPointeeType();
     VK = VK_LValue;

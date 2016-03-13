@@ -35,11 +35,10 @@ class LambdaCapture {
     /// This includes the case of a non-reference init-capture.
     Capture_ByCopy = 0x02
   };
-
   llvm::PointerIntPair<Decl *, 2> DeclAndBits;
   SourceLocation Loc;
   SourceLocation EllipsisLoc;
-
+  bool IsStarThis : 1;
   friend class ASTStmtReader;
   friend class ASTStmtWriter;
 
@@ -69,8 +68,12 @@ public:
   /// \brief Determine whether this capture handles the C++ \c this
   /// pointer.
   bool capturesThis() const {
-    return (DeclAndBits.getPointer() == nullptr) &&
-           !(DeclAndBits.getInt() & Capture_ByCopy);
+    return ((DeclAndBits.getPointer() == nullptr) &&
+           !(DeclAndBits.getInt() & Capture_ByCopy)) 
+           || IsStarThis;
+  }
+  bool capturesStarThis() const {
+    return capturesThis() && IsStarThis;
   }
 
   /// \brief Determine whether this capture handles a variable.

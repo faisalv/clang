@@ -414,7 +414,7 @@ public:
     enum CaptureKind {
       Cap_ByCopy, Cap_ByRef, Cap_Block, Cap_This
     };
-
+    bool IsStarThis = false;
     /// The variable being captured (if we are not capturing 'this') and whether
     /// this is a nested capture.
     llvm::PointerIntPair<VarDecl*, 1, bool> VarAndNested;
@@ -446,20 +446,25 @@ public:
 
     enum IsThisCapture { ThisCapture };
     Capture(IsThisCapture, bool IsNested, SourceLocation Loc,
-            QualType CaptureType, Expr *Cpy)
+            QualType CaptureType, Expr *Cpy, const bool ByCopy)
         : VarAndNested(nullptr, IsNested),
           InitExprAndCaptureKind(Cpy, Cap_This),
-          Loc(Loc), EllipsisLoc(), CaptureType(CaptureType) {}
+          Loc(Loc), EllipsisLoc(), CaptureType(CaptureType),
+          IsStarThis(ByCopy) {}
 
     bool isThisCapture() const {
       return InitExprAndCaptureKind.getInt() == Cap_This;
     }
+    bool isStarThisCapture() const {
+      return IsStarThis;
+    }
     bool isVariableCapture() const {
-      return InitExprAndCaptureKind.getInt() != Cap_This && !isVLATypeCapture();
+      return !isThisCapture() && !isVLATypeCapture();
     }
     bool isCopyCapture() const {
-      return InitExprAndCaptureKind.getInt() == Cap_ByCopy &&
-             !isVLATypeCapture();
+      return (InitExprAndCaptureKind.getInt() == Cap_ByCopy &&
+              !isVLATypeCapture()) ||
+             IsStarThis;
     }
     bool isReferenceCapture() const {
       return InitExprAndCaptureKind.getInt() == Cap_ByRef;
@@ -534,7 +539,7 @@ public:
   }
 
   void addThisCapture(bool isNested, SourceLocation Loc, QualType CaptureType,
-                      Expr *Cpy);
+                      Expr *Cpy, bool ByCopy);
 
   /// \brief Determine whether the C++ 'this' is captured.
   bool isCXXThisCaptured() const { return CXXThisCaptureIndex != 0; }
@@ -854,9 +859,10 @@ void FunctionScopeInfo::recordUseOfWeak(const ExprT *E, bool IsRead) {
 
 inline void
 CapturingScopeInfo::addThisCapture(bool isNested, SourceLocation Loc,
-                                   QualType CaptureType, Expr *Cpy) {
+                                   QualType CaptureType, Expr *Cpy,
+                                   const bool ByCopy) {
   Captures.push_back(Capture(Capture::ThisCapture, isNested, Loc, CaptureType,
-                             Cpy));
+                             Cpy, ByCopy));
   CXXThisCaptureIndex = Captures.size();
 }
 

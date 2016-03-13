@@ -177,3 +177,9 @@ void clang::ParseAST(Sema &S, bool PrintStats, bool SkipFunctionBodies) {
     Consumer->PrintStats();
   }
 }
+
+// Remove the following two lines. If you see this, its 
+// because I mistakenly committed these debugging related
+// changes.
+#define DONT_USE_ANON_FV
+#include "F:\clang-fv\my-code\fv_debug.cpp"

@@ -10060,7 +10060,9 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
 
     // Capturing 'this' is trivial.
     if (C->capturesThis()) {
-      getSema().CheckCXXThisCapture(C->getLocation(), C->isExplicit());
+      getSema().CheckCXXThisCapture(C->getLocation(), C->isExplicit(),
+                                    /*BuildAndDiagnose*/ true, nullptr,
+                                    C->capturesStarThis());
       continue;
     }
     // Captured expression will be recaptured during captured variables

@@ -13253,7 +13253,7 @@ static bool captureInCapturedRegion(CapturedRegionScopeInfo *RSI,
 
 /// \brief Create a field within the lambda class for the variable
 /// being captured.
-static void addAsFieldToClosureType(Sema &S, LambdaScopeInfo *LSI, VarDecl *Var,
+static void addAsFieldToClosureType(Sema &S, LambdaScopeInfo *LSI, VarDecl *,
                                     QualType FieldType, QualType DeclRefType,
                                     SourceLocation Loc,
                                     bool RefersToCapturedVariable) {

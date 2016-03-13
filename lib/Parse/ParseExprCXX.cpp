@@ -846,8 +846,13 @@ Optional<unsigned> Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
     IdentifierInfo *Id = nullptr;
     SourceLocation EllipsisLoc;
     ExprResult Init;
-    
-    if (Tok.is(tok::kw_this)) {
+
+    if (Tok.is(tok::star) && NextToken().is(tok::kw_this)) {
+      Kind = LCK_StarThis;
+      // FIXME: We should store our location for '*' for better diagnostic messages;
+      ConsumeToken(); // Consume '*'
+      Loc = ConsumeToken();
+    } else if (Tok.is(tok::kw_this)) {
       Kind = LCK_This;
       Loc = ConsumeToken();
     } else {

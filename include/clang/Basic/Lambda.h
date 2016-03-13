@@ -33,6 +33,7 @@ enum LambdaCaptureDefault {
 /// is an expression.
 enum LambdaCaptureKind {
   LCK_This,   ///< Capturing the \c this pointer
+  LCK_StarThis, /// < Capturing the \c *this object by value
   LCK_ByCopy, ///< Capturing by copy (a.k.a., by value)
   LCK_ByRef,  ///< Capturing by reference
   LCK_VLAType ///< Capturing variable-length array type

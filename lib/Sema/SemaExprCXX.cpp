@@ -849,7 +849,21 @@ QualType Sema::getCurrentThisType() {
           cast<CXXRecordDecl>(CurContext->getParent()->getParent()));
       // There are no cv-qualifiers for 'this' within default initializers, 
       // per [expr.prim.general]p4.
-      return Context.getPointerType(ClassTy);
+      ThisTy = Context.getPointerType(ClassTy);
+    }
+  }
+   // Add const for '* this' capture if not mutable.
+  if (isLambdaCallOperator(CurContext)) {
+    LambdaScopeInfo *LSI = getCurLambda();
+    assert(LSI);
+    if (LSI->isCXXThisCaptured()) {
+      auto C = LSI->getCXXThisCapture();
+      QualType BaseType = ThisTy->getPointeeType();
+      if (C.isStarThisCapture() && LSI->CallOperator->isConst() &&
+          !BaseType.isConstQualified()) {
+        BaseType.addConst();
+        ThisTy = Context.getPointerType(BaseType);
+      }
     }
   }
   return ThisTy;
@@ -884,20 +898,37 @@ Sema::CXXThisScopeRAII::~CXXThisScopeRAII() {
   }
 }
 
-static Expr *captureThis(ASTContext &Context, RecordDecl *RD,
-                         QualType ThisTy, SourceLocation Loc) {
+static Expr *captureThis(Sema &S, ASTContext &Context, RecordDecl *RD,
+                         QualType ThisTy, SourceLocation Loc,
+                         const bool ByCopy) {
+  QualType CaptureThisTy = ByCopy ? ThisTy->getPointeeType() : ThisTy;
+ 
   FieldDecl *Field
-    = FieldDecl::Create(Context, RD, Loc, Loc, nullptr, ThisTy,
-                        Context.getTrivialTypeSourceInfo(ThisTy, Loc),
+       = FieldDecl::Create(Context, RD, Loc, Loc, nullptr, CaptureThisTy,
+                       Context.getTrivialTypeSourceInfo(CaptureThisTy, Loc),
                         nullptr, false, ICIS_NoInit);
   Field->setImplicit(true);
   Field->setAccess(AS_private);
   RD->addDecl(Field);
-  return new (Context) CXXThisExpr(Loc, ThisTy, /*isImplicit*/true);
+  Expr *This = new (Context) CXXThisExpr(Loc, ThisTy, /*isImplicit*/true);
+  if (ByCopy) {
+    Expr *StarThis =  S.CreateBuiltinUnaryOp(Loc,
+                                      UO_Deref,
+                                      This).get();
+    InitializedEntity Entity = InitializedEntity::InitializeLambdaCapture(
+      &S.Context.Idents.get("*this"), CaptureThisTy, Loc);
+    InitializationKind InitKind = InitializationKind::CreateDirect(Loc, Loc, Loc);
+    InitializationSequence Init(S, Entity, InitKind, StarThis);
+    ExprResult ER = Init.Perform(S, Entity, InitKind, StarThis);
+    if (ER.isInvalid()) return nullptr;
+    return ER.get();
+  }
+  return This;
 }
 
 bool Sema::CheckCXXThisCapture(SourceLocation Loc, bool Explicit, 
-    bool BuildAndDiagnose, const unsigned *const FunctionScopeIndexToStopAt) {
+    bool BuildAndDiagnose, const unsigned *const FunctionScopeIndexToStopAt,
+    const bool ByCopy) {
   // We don't need to capture this in an unevaluated context.
   if (isUnevaluatedContext() && !Explicit)
     return true;
@@ -948,13 +979,15 @@ bool Sema::CheckCXXThisCapture(SourceLocation Loc, bool Explicit,
     QualType ThisTy = getCurrentThisType();
     if (LambdaScopeInfo *LSI = dyn_cast<LambdaScopeInfo>(CSI))
       // For lambda expressions, build a field and an initializing expression.
-      ThisExpr = captureThis(Context, LSI->Lambda, ThisTy, Loc);
+      ThisExpr = captureThis(*this, Context, LSI->Lambda, ThisTy, Loc, ByCopy);
     else if (CapturedRegionScopeInfo *RSI
         = dyn_cast<CapturedRegionScopeInfo>(FunctionScopes[idx]))
-      ThisExpr = captureThis(Context, RSI->TheRecordDecl, ThisTy, Loc);
+      ThisExpr =
+          captureThis(*this, Context, RSI->TheRecordDecl, ThisTy, Loc,
+                      false/*ByCopy*/);
 
     bool isNested = NumClosures > 1;
-    CSI->addThisCapture(isNested, Loc, ThisTy, ThisExpr);
+    CSI->addThisCapture(isNested, Loc, ThisTy, ThisExpr, ByCopy);
   }
   return false;
 }
@@ -968,6 +1001,7 @@ ExprResult Sema::ActOnCXXThis(SourceLocation Loc) {
   if (ThisTy.isNull()) return Diag(Loc, diag::err_invalid_this_use);
 
   CheckCXXThisCapture(Loc);
+ 
   return new (Context) CXXThisExpr(Loc, ThisTy, /*isImplicit=*/false);
 }
 
