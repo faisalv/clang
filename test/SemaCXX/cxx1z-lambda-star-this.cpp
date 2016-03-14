@@ -10,6 +10,9 @@ class A {
   int x = 345;
   auto foo() {
     (void) [*this, this] { };  //expected-error{{'this' can appear only once}}
+    (void) [this] { ++x; };
+    (void) [*this] { ++x; };  //expected-error{{read-only variable}}
+    (void) [*this] () mutable { ++x; };
     (void) [=] { return x; };
     (void) [&, this] { return x; };
     (void) [=, *this] { return x; };
@@ -44,4 +47,26 @@ namespace ns3 {
   } b;
   B *c = (b.foo(), nullptr); //expected-note{{in instantiation}}
 } // end ns3
+
+namespace ns4 {
+template<class U>
+class B {
+  B(const B&) = delete; //expected-note{{deleted here}}
+  double d = 3.14;
+  public: 
+  template<class T = int>
+  auto foo() {
+    const auto &L = [*this] (auto a) mutable { //expected-error{{call to deleted}}
+      d += a; 
+      return [this] (auto b) { return d +=b; }; 
+    }; 
+  }
+  
+  B() = default;
+};
+void main() {
+  B<int*> b;
+  b.foo(); //expected-note{{in instantiation}}
+} // end main  
+} // end ns4
 } //end ns test_star_this
