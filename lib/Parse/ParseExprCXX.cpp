@@ -849,9 +849,15 @@ Optional<unsigned> Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
 
     if (Tok.is(tok::star) && NextToken().is(tok::kw_this)) {
       Kind = LCK_StarThis;
-      // FIXME: We should store our location for '*' for better diagnostic messages;
-      ConsumeToken(); // Consume '*'
+      
+      // Consume '*'
       Loc = ConsumeToken();
+      // Consume 'this'
+      ConsumeToken();
+      Diag(Loc, !getLangOpts().CPlusPlus1z
+                             ? diag::ext_star_this_lambda_capture_cxx1z
+                             : diag::warn_cxx14_compat_star_this_lambda_capture);
+
     } else if (Tok.is(tok::kw_this)) {
       Kind = LCK_This;
       Loc = ConsumeToken();
