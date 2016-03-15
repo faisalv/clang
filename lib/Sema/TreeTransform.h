@@ -10062,7 +10062,7 @@ TreeTransform<Derived>::TransformLambdaExpr(LambdaExpr *E) {
     if (C->capturesThis()) {
       getSema().CheckCXXThisCapture(C->getLocation(), C->isExplicit(),
                                     /*BuildAndDiagnose*/ true, nullptr,
-                                    C->capturesStarThis());
+                                    C->getCaptureKind() == LCK_StarThis);
       continue;
     }
     // Captured expression will be recaptured during captured variables

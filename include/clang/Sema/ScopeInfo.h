@@ -412,18 +412,20 @@ public:
     // variables of reference type are captured by reference, and other
     // variables are captured by copy.
     enum CaptureKind {
-      Cap_ByCopy, Cap_ByRef, Cap_Block, Cap_This
+      Cap_ByCopy, Cap_ByRef, Cap_Block, Cap_VLA
     };
-    bool IsStarThis = false;
-    /// The variable being captured (if we are not capturing 'this') and whether
-    /// this is a nested capture.
-    llvm::PointerIntPair<VarDecl*, 1, bool> VarAndNested;
-
     /// Expression to initialize a field of the given type, and the kind of
     /// capture (if this is a capture and not an init-capture). The expression
     /// is only required if we are capturing ByVal and the variable's type has
     /// a non-trivial copy constructor.
     llvm::PointerIntPair<void *, 2, CaptureKind> InitExprAndCaptureKind;
+    enum {
+      IsNestedCapture = 0x1,
+      IsThisCaptured = 0x2
+    };
+    /// The variable being captured (if we are not capturing 'this') and whether
+    /// this is a nested capture, and whether we are capturing 'this'
+    llvm::PointerIntPair<VarDecl*, 2> VarAndNestedAndThis;
 
     /// \brief The source location at which the first capture occurred.
     SourceLocation Loc;
@@ -439,32 +441,28 @@ public:
     Capture(VarDecl *Var, bool Block, bool ByRef, bool IsNested,
             SourceLocation Loc, SourceLocation EllipsisLoc,
             QualType CaptureType, Expr *Cpy)
-        : VarAndNested(Var, IsNested),
-          InitExprAndCaptureKind(Cpy, Block ? Cap_Block :
-                                      ByRef ? Cap_ByRef : Cap_ByCopy),
+        : VarAndNestedAndThis(Var, IsNested ? IsNestedCapture : 0),
+          InitExprAndCaptureKind(
+              Cpy, !Var ? Cap_VLA : Block ? Cap_Block : ByRef ? Cap_ByRef
+                                                              : Cap_ByCopy),
           Loc(Loc), EllipsisLoc(EllipsisLoc), CaptureType(CaptureType) {}
 
     enum IsThisCapture { ThisCapture };
     Capture(IsThisCapture, bool IsNested, SourceLocation Loc,
             QualType CaptureType, Expr *Cpy, const bool ByCopy)
-        : VarAndNested(nullptr, IsNested),
-          InitExprAndCaptureKind(Cpy, Cap_This),
-          Loc(Loc), EllipsisLoc(), CaptureType(CaptureType),
-          IsStarThis(ByCopy) {}
+        : VarAndNestedAndThis(
+              nullptr, (IsThisCaptured | (IsNested ? IsNestedCapture : 0))),
+          InitExprAndCaptureKind(Cpy, ByCopy ? Cap_ByCopy : Cap_ByRef),
+          Loc(Loc), EllipsisLoc(), CaptureType(CaptureType) {}
 
     bool isThisCapture() const {
-      return InitExprAndCaptureKind.getInt() == Cap_This;
-    }
-    bool isStarThisCapture() const {
-      return IsStarThis;
+      return VarAndNestedAndThis.getInt() & IsThisCaptured;
     }
     bool isVariableCapture() const {
       return !isThisCapture() && !isVLATypeCapture();
     }
     bool isCopyCapture() const {
-      return (InitExprAndCaptureKind.getInt() == Cap_ByCopy &&
-              !isVLATypeCapture()) ||
-             IsStarThis;
+      return InitExprAndCaptureKind.getInt() == Cap_ByCopy;
     }
     bool isReferenceCapture() const {
       return InitExprAndCaptureKind.getInt() == Cap_ByRef;
@@ -473,13 +471,14 @@ public:
       return InitExprAndCaptureKind.getInt() == Cap_Block;
     }
     bool isVLATypeCapture() const {
-      return InitExprAndCaptureKind.getInt() == Cap_ByCopy &&
-             getVariable() == nullptr;
+      return InitExprAndCaptureKind.getInt() == Cap_VLA;
     }
-    bool isNested() const { return VarAndNested.getInt(); }
+    bool isNested() const {
+      return VarAndNestedAndThis.getInt() & IsNestedCapture;
+    }
 
     VarDecl *getVariable() const {
-      return VarAndNested.getPointer();
+      return VarAndNestedAndThis.getPointer();
     }
     
     /// \brief Retrieve the location at which this variable was captured.

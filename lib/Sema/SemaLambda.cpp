@@ -925,6 +925,11 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
   for (auto C = Intro.Captures.begin(), E = Intro.Captures.end(); C != E;
        PrevCaptureLoc = C->Loc, ++C) {
     if (C->Kind == LCK_This || C->Kind == LCK_StarThis) {
+      if (C->Kind == LCK_StarThis) 
+        Diag(C->Loc, !getLangOpts().CPlusPlus1z
+                             ? diag::ext_star_this_lambda_capture_cxx1z
+                             : diag::warn_cxx14_compat_star_this_lambda_capture);
+
       // C++11 [expr.prim.lambda]p8:
       //   An identifier or this shall not appear more than once in a 
       //   lambda-capture.
@@ -935,10 +940,12 @@ void Sema::ActOnStartOfLambdaDefinition(LambdaIntroducer &Intro,
                    SourceRange(getLocForEndOfToken(PrevCaptureLoc), C->Loc));
         continue;
       }
-      // FIXME: Fix this comment from the wording for lambda '*this' wording.
-      // C++11 [expr.prim.lambda]p8:
-      //   If a lambda-capture includes a capture-default that is =, the 
-      //   lambda-capture shall not contain this [...].
+
+      // C++1z [expr.prim.lambda]p8:
+      //  If a lambda-capture includes a capture-default that is =, each
+      //  simple-capture of that lambda-capture shall be of the form "&
+      //  identifier" or "* this". [ Note: The form [&,this] is redundant but
+      //  accepted for compatibility with ISO C++14. --end note ]
       if (Intro.Default == LCD_ByCopy && C->Kind != LCK_StarThis) {
         Diag(C->Loc, diag::err_this_capture_with_copy_default)
             << FixItHint::CreateRemoval(
@@ -1532,7 +1539,7 @@ ExprResult Sema::BuildLambdaExpr(SourceLocation StartLoc, SourceLocation EndLoc,
       if (From.isThisCapture()) {
         Captures.push_back(
             LambdaCapture(From.getLocation(), IsImplicit,
-                          From.isStarThisCapture() ? LCK_StarThis : LCK_This));
+                          From.isCopyCapture() ? LCK_StarThis : LCK_This));
         CaptureInits.push_back(From.getInitExpr());
         ArrayIndexStarts.push_back(ArrayIndexVars.size());
         continue;

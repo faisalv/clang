@@ -847,17 +847,14 @@ Optional<unsigned> Parser::ParseLambdaIntroducer(LambdaIntroducer &Intro,
     SourceLocation EllipsisLoc;
     ExprResult Init;
 
-    if (Tok.is(tok::star) && NextToken().is(tok::kw_this)) {
-      Kind = LCK_StarThis;
-      
-      // Consume '*'
-      Loc = ConsumeToken();
-      // Consume 'this'
-      ConsumeToken();
-      Diag(Loc, !getLangOpts().CPlusPlus1z
-                             ? diag::ext_star_this_lambda_capture_cxx1z
-                             : diag::warn_cxx14_compat_star_this_lambda_capture);
-
+    if (Tok.is(tok::star)) {
+      Loc = ConsumeToken(); // Consume '*'
+      if (Tok.is(tok::kw_this)) {
+        ConsumeToken();     // Consume 'this'
+        Kind = LCK_StarThis;      
+      } else {
+        return DiagResult(diag::err_expected_star_this_capture);
+      }
     } else if (Tok.is(tok::kw_this)) {
       Kind = LCK_This;
       Loc = ConsumeToken();

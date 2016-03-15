@@ -767,11 +767,8 @@ def err_lambda_missing_parens : Error<
   "lambda requires '()' before %select{'mutable'|return type|"
   "attribute specifier}0">;
 // C++1z lambda expressions
-def warn_cxx14_compat_star_this_lambda_capture : Warning<
-  "by value capture of '*this' is incompatible with C++ standards before C++1z">,
-  InGroup<CXXPre1zCompat>, DefaultIgnore;
-def ext_star_this_lambda_capture_cxx1z : ExtWarn<
-  "by value capture of '*this' is a C++1z extension">, InGroup<CXX1z>;
+def err_expected_star_this_capture : Error<
+  "expected 'this' following '*' in lambda capture list">;
 
 // Availability attribute
 def err_expected_version : Error<

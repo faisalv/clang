@@ -21,6 +21,7 @@
 
 namespace clang {
 
+
 /// \brief Describes the capture of a variable or of \c this, or of a
 /// C++1y init-capture.
 class LambdaCapture {
@@ -35,10 +36,21 @@ class LambdaCapture {
     /// This includes the case of a non-reference init-capture.
     Capture_ByCopy = 0x02
   };
-  llvm::PointerIntPair<Decl *, 2> DeclAndBits;
+  struct LLVM_ALIGNAS(4) OpaqueCapturedEntity {};
+  static OpaqueCapturedEntity ThisSentinel;
+  static OpaqueCapturedEntity VLASentinel;
+  
+  // Captured Entity could represent:
+  // - a VarDecl* that represents the variable that was captured or the 
+  //   init-capture.
+  // - or, points to the ThisSentinel if this represents a capture of '*this'
+  //   by value or reference.
+  // - or, points to the VLASentinel if this represents a by VLA capture.
+  llvm::PointerIntPair<void*, 2> CapturedEntityAndBits;
+
   SourceLocation Loc;
   SourceLocation EllipsisLoc;
-  bool IsStarThis : 1;
+  
   friend class ASTStmtReader;
   friend class ASTStmtWriter;
 
@@ -68,24 +80,21 @@ public:
   /// \brief Determine whether this capture handles the C++ \c this
   /// pointer.
   bool capturesThis() const {
-    return ((DeclAndBits.getPointer() == nullptr) &&
-           !(DeclAndBits.getInt() & Capture_ByCopy)) 
-           || IsStarThis;
+    return CapturedEntityAndBits.getPointer() == &ThisSentinel;
   }
-  bool capturesStarThis() const {
-    return capturesThis() && IsStarThis;
-  }
-
+  
   /// \brief Determine whether this capture handles a variable.
   bool capturesVariable() const {
-    return dyn_cast_or_null<VarDecl>(DeclAndBits.getPointer());
+    void *Ptr = CapturedEntityAndBits.getPointer();
+    if (Ptr != &ThisSentinel && Ptr != &VLASentinel)
+      return dyn_cast_or_null<VarDecl>(static_cast<Decl *>(Ptr));
+    return false;
   }
 
   /// \brief Determine whether this captures a variable length array bound
   /// expression.
   bool capturesVLAType() const {
-    return (DeclAndBits.getPointer() == nullptr) &&
-           (DeclAndBits.getInt() & Capture_ByCopy);
+    return CapturedEntityAndBits.getPointer() == &VLASentinel;
   }
 
   /// \brief Retrieve the declaration of the local variable being
@@ -94,13 +103,15 @@ public:
   /// This operation is only valid if this capture is a variable capture
   /// (other than a capture of \c this).
   VarDecl *getCapturedVar() const {
-    assert(capturesVariable() && "No variable available for 'this' capture");
-    return cast<VarDecl>(DeclAndBits.getPointer());
+    assert(capturesVariable() && "No variable available for capture");
+    return static_cast<VarDecl *>(CapturedEntityAndBits.getPointer());
   }
 
   /// \brief Determine whether this was an implicit capture (not
   /// written between the square brackets introducing the lambda).
-  bool isImplicit() const { return DeclAndBits.getInt() & Capture_Implicit; }
+  bool isImplicit() const {
+    return CapturedEntityAndBits.getInt() & Capture_Implicit;
+  }
 
   /// \brief Determine whether this was an explicit capture (written
   /// between the square brackets introducing the lambda).
