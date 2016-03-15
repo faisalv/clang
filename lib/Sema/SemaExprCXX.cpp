@@ -932,10 +932,31 @@ bool Sema::CheckCXXThisCapture(SourceLocation Loc, bool Explicit,
   // We don't need to capture this in an unevaluated context.
   if (isUnevaluatedContext() && !Explicit)
     return true;
+  
+  assert((!ByCopy || Explicit) && "cannot implicitly capture *this by value");
 
   const unsigned MaxFunctionScopesIndex = FunctionScopeIndexToStopAt ?
-    *FunctionScopeIndexToStopAt : FunctionScopes.size() - 1;  
- // Otherwise, check that we can capture 'this'.
+    *FunctionScopeIndexToStopAt : FunctionScopes.size() - 1;
+  
+  // Otherwise, check that we can capture the *enclosing object* (referred to by
+  // '*this').
+
+  // Note: the *enclosing object* can only be captured by-value by using the
+  // explicit notation: [*this] { ... }.
+  // Every other capture of the *enclosing object* results in its by-reference
+  // capture: [=] { this->... }, [&] { this->... }, [this] { ... }.
+
+  // For a lambda 'L' (at MaxFunctionScopesIndex in the FunctionScope stack), 
+  // we can capture the *enclosing object* only if:
+  //  - there is no enclosing lambda and
+  //    --  'L' has an explicit byref or byval capture of the *enclosing object*
+  //    --  or, 'L' has an implicit capture.
+  //  - or, there is some enclosing lambda 'E' that has already captured the 
+  //    *enclosing object*, and every intervening lambda (if any) between 'E' 
+  //    and 'L' can implicitly capture the *enclosing object*.
+  //  - or, every enclosing lambda can implicitly capture the *enclosing object*
+  
+
   unsigned NumClosures = 0;
   for (unsigned idx = MaxFunctionScopesIndex; idx != 0; idx--) {
     if (CapturingScopeInfo *CSI =
@@ -969,18 +990,26 @@ bool Sema::CheckCXXThisCapture(SourceLocation Loc, bool Explicit,
     break;
   }
   if (!BuildAndDiagnose) return false;
+  
   // Mark that we're implicitly capturing 'this' in all the scopes we skipped.
   // FIXME: We need to delay this marking in PotentiallyPotentiallyEvaluated
   // contexts.
+
+  // Implicit *enclosing object* captures are never by copy.
+  bool UseByCopyFlag = ByCopy;  
   for (unsigned idx = MaxFunctionScopesIndex; NumClosures; 
       --idx, --NumClosures) {
     CapturingScopeInfo *CSI = cast<CapturingScopeInfo>(FunctionScopes[idx]);
     Expr *ThisExpr = nullptr;
     QualType ThisTy = getCurrentThisType();
-    if (LambdaScopeInfo *LSI = dyn_cast<LambdaScopeInfo>(CSI))
+    if (LambdaScopeInfo *LSI = dyn_cast<LambdaScopeInfo>(CSI)) {
       // For lambda expressions, build a field and an initializing expression.
-      ThisExpr = captureThis(*this, Context, LSI->Lambda, ThisTy, Loc, ByCopy);
-    else if (CapturedRegionScopeInfo *RSI
+      ThisExpr = captureThis(*this, Context, LSI->Lambda, ThisTy, Loc,
+                             UseByCopyFlag);
+      // If we must capture the *enclosing object* in outer lambdas, they must
+      // be implicit captures, which must be by-reference captures.
+      UseByCopyFlag = false;
+    } else if (CapturedRegionScopeInfo *RSI
         = dyn_cast<CapturedRegionScopeInfo>(FunctionScopes[idx]))
       ThisExpr =
           captureThis(*this, Context, RSI->TheRecordDecl, ThisTy, Loc,
