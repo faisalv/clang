@@ -121,11 +121,13 @@ Preprocessor::Preprocessor(std::shared_ptr<PreprocessorOptions> PPOpts,
 
   // We haven't read anything from the external source.
   ReadMacrosFromExternalSource = false;
-  
-  // "Poison" __VA_ARGS__, which can only appear in the expansion of a macro.
-  // This gets unpoisoned where it is allowed.
+
+  // "Poison" __VA_ARGS__, __VA_OPTS__ which can only appear in the expansion of
+  // a macro. They get unpoisoned where they are allowed.
   (Ident__VA_ARGS__ = getIdentifierInfo("__VA_ARGS__"))->setIsPoisoned();
-  SetPoisonReason(Ident__VA_ARGS__,diag::ext_pp_bad_vaargs_use);
+  SetPoisonReason(Ident__VA_ARGS__, diag::ext_pp_bad_vaargs_use);
+  (Ident__VA_OPT__ = getIdentifierInfo("__VA_OPT__"))->setIsPoisoned();
+  SetPoisonReason(Ident__VA_OPT__, diag::ext_pp_bad_vaopt_use);
   
   // Initialize the pragma handlers.
   RegisterBuiltinPragmas();
@@ -653,13 +655,15 @@ bool Preprocessor::HandleIdentifier(Token &Identifier) {
   // unpoisoned it if we're defining a C99 macro.
   if (II.isOutOfDate()) {
     bool CurrentIsPoisoned = false;
-    if (&II == Ident__VA_ARGS__)
-      CurrentIsPoisoned = Ident__VA_ARGS__->isPoisoned();
+    const bool IsVariadicMacroExpander =
+        &II == Ident__VA_ARGS__ || &II == Ident__VA_OPT__;
+    if (IsVariadicMacroExpander)
+      CurrentIsPoisoned = II.isPoisoned();
 
     updateOutOfDateIdentifier(II);
     Identifier.setKind(II.getTokenID());
 
-    if (&II == Ident__VA_ARGS__)
+    if (IsVariadicMacroExpander)
       II.setIsPoisoned(CurrentIsPoisoned);
   }
   

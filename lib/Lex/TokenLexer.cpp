@@ -178,19 +178,78 @@ void TokenLexer::ExpandFunctionArguments() {
   // we install the newly expanded sequence as the new 'Tokens' list.
   bool MadeChange = false;
 
+  const bool HasNonEmptyVariadicArguments = [&] {  
+    if (Macro->isVariadic()) {
+      const int VariadicArgIndex = Macro->getNumArgs() - 1;
+      const auto *VarArgs = ActualArgs->getUnexpArgument(VariadicArgIndex);
+      return VarArgs->isNot(tok::eof);
+      /*
+      // iterate through and find any non-comma tokens
+      const auto NumVarArgTokens = ActualArgs->getArgLength(VarArgs);
+      
+      
+      bool FoundNonCommaInVarArgs = false;
+      for (unsigned I = 0; I != NumVarArgTokens; ++I, ++VarArgs) {
+        if (!VarArgs->is(tok::comma)) {
+          FoundNonCommaInVarArgs = true;
+          break;
+        }
+      }
+      return FoundNonCommaInVarArgs;
+      */
+    }
+    return false;
+  }();
+  int SkipMatchingVAOPTSParen = 0;
+  bool IsInVAOPT = false;
+  Token PriorTok{};
   for (unsigned i = 0, e = NumTokens; i != e; ++i) {
+    
     // If we found the stringify operator, get the argument stringified.  The
     // preprocessor already verified that the following token is a macro name
     // when the #define was parsed.
     const Token &CurTok = Tokens[i];
+    /*
+    struct SetPriorToken {
+      Token &PriorTok;
+      const Token &CurTok;
+      bool Disable;
+      ~SetPriorToken() {
+        if (!Disable)
+          PriorTok = CurTok;
+      }
+    } SetPriorToken = { PriorTok, CurTok, false };
+    //*/
+    struct SetPriorToken {
+      Token &PriorTok;
+      const Token *const Tokens;
+      bool Disable;
+      const unsigned &I;
+      ~SetPriorToken() {
+        if (!Disable)
+          PriorTok = Tokens[I];
+      }
+    } SetPriorToken = { PriorTok, Tokens, false, i };
+    if (IsInVAOPT) {
+      if (CurTok.is(tok::r_paren)) 
+        --SkipMatchingVAOPTSParen;
+      else if (CurTok.is(tok::l_paren))
+        ++SkipMatchingVAOPTSParen;
+      if (!SkipMatchingVAOPTSParen) {
+        // we matched the outermost lparen with the rparen
+        IsInVAOPT = false;
+        continue;
+      }      
+    }
+    assert(!IsInVAOPT || SkipMatchingVAOPTSParen);
     // We don't want a space for the next token after a paste
     // operator.  In valid code, the token will get smooshed onto the
     // preceding one anyway. In assembler-with-cpp mode, invalid
     // pastes are allowed through: in this case, we do not want the
     // extra whitespace to be added.  For example, we want ". ## foo"
     // -> ".foo" not ". foo".
-    if (i != 0 && !Tokens[i-1].is(tok::hashhash) && CurTok.hasLeadingSpace())
-      NextTokGetsSpace = true;
+    if (i != 0 && !PriorTok.is(tok::hashhash) && CurTok.hasLeadingSpace())
+       NextTokGetsSpace = true;
 
     if (CurTok.isOneOf(tok::hash, tok::hashat)) {
       int ArgNo = Macro->getArgumentNum(Tokens[i+1].getIdentifierInfo());
@@ -230,8 +289,16 @@ void TokenLexer::ExpandFunctionArguments() {
     // Find out if there is a paste (##) operator before or after the token.
     bool NonEmptyPasteBefore =
       !ResultToks.empty() && ResultToks.back().is(tok::hashhash);
-    bool PasteBefore = i != 0 && Tokens[i-1].is(tok::hashhash);
-    bool PasteAfter = i+1 != e && Tokens[i+1].is(tok::hashhash);
+    bool PasteBefore = i != 0 && PriorTok.is(tok::hashhash); 
+                                 //Tokens[i-1].is(tok::hashhash);
+    bool PasteAfter =
+        i + 1 != e &&
+        (Tokens[i + 1].is(
+             tok::hashhash) || /* If we are in VAOPT check if the token after
+                                  the closing paren is the concat operator*/
+         (Tokens[i + 1].is(tok::r_paren) && SkipMatchingVAOPTSParen == 1 &&
+          i + 2 != e && Tokens[i + 2].is(tok::hashhash)));
+
     assert(!NonEmptyPasteBefore || PasteBefore);
 
     // Otherwise, if this is not an argument token, just add the token to the
@@ -239,8 +306,44 @@ void TokenLexer::ExpandFunctionArguments() {
     IdentifierInfo *II = CurTok.getIdentifierInfo();
     int ArgNo = II ? Macro->getArgumentNum(II) : -1;
     if (ArgNo == -1) {
-      // This isn't an argument, just add it.
-      ResultToks.push_back(CurTok);
+      if (II && II == PP.Ident__VA_OPT__) {
+        MadeChange = true;
+
+        SetPriorToken.Disable = true;
+        if (i != 0) {
+          SetPriorToken.PriorTok = Tokens[i - 1];
+        }
+        assert(!SkipMatchingVAOPTSParen && "can't have nested VAOPTS!");
+        assert(!IsInVAOPT && "can't have nested VAOPTS!");
+        
+        if (HasNonEmptyVariadicArguments) {
+          ++i; // Skip the LParen;
+          assert( i != e && "Can't end with __VA_OPTS__ followed by lparen");
+          SkipMatchingVAOPTSParen = 1;
+          IsInVAOPT = true;
+        } else {
+          // there are no variadic arguments so skip va_opts until we hit the
+          // matching r_paren
+          assert(Tokens[i + 1].is(tok::l_paren));
+          int MatchParens = 1;
+          for (i += 2; i != e; ++i) {
+            if (Tokens[i].is(tok::r_paren))
+              --MatchParens;
+            else if (Tokens[i].is(tok::l_paren))
+              ++MatchParens;
+            if (!MatchParens)
+              break;
+          }
+          // If we had a concat operator before this '## __VA_OPT__(...)', eat
+          // it to mimic the placemarker stuff
+          if (NonEmptyPasteBefore) ResultToks.pop_back();
+          if (i == e) break; // break out of the outer loop.
+        }
+        continue;
+      } else {
+        // This isn't an argument, just add it.
+        ResultToks.push_back(CurTok);
+      }
 
       if (NextTokGetsSpace) {
         ResultToks.back().setFlag(Token::LeadingSpace);

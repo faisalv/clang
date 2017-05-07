@@ -2349,8 +2349,12 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
     // "Poison" __VA_ARGS__, which can only appear in the expansion of a macro.
     // This gets unpoisoned where it is allowed.
     assert(Ident__VA_ARGS__->isPoisoned() && "__VA_ARGS__ should be poisoned!");
-    if (MI->isC99Varargs())
+    assert(Ident__VA_OPT__->isPoisoned() && "__VA_OPT__ should be poisoned!");
+
+    if (MI->isC99Varargs()) {
       Ident__VA_ARGS__->setIsPoisoned(false);
+      Ident__VA_OPT__->setIsPoisoned(false);
+    }
 
     // Read the first token after the arg list for down below.
     LexUnexpandedToken(Tok);
@@ -2393,11 +2397,118 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
       LexUnexpandedToken(Tok);
     }
   } else {
+
+    class VAOptState {
+      clang::Token &Tok;
+      Preprocessor &PP;
+      clang::Token PrevTok;
+      
+      bool IsInVAOpt = false;
+      int NumParens = 0;
+      bool ErrorOccurred = false;
+      bool SawLParen = false;
+      bool SawTokenAfterInitialLParen = false;
+      bool Disabled = false;
+      void sawLParen() {
+        assert(isIn());
+        ++NumParens;
+        SawLParen = true;
+      }
+
+      void sawRParen() {
+        assert(isIn());
+
+        if (NumParens) {
+          if (!--NumParens) {
+            if (PrevTok.is(tok::l_paren)) {
+              PP.Diag(Tok, diag::err_pp_missing_token_in_vaopt_use);
+              ErrorOccurred = true;
+            } else if (PrevTok.is(tok::hashhash)) {
+              PP.Diag(PrevTok,  diag::err_vaopt_paste_at_end);
+              ErrorOccurred = true;
+            }
+            exitVAOpt();
+          }
+        }
+      }
+      // returns true on error
+      void enterVAOpt() {
+        if (isIn()) {
+          PP.Diag(Tok, diag::err_pp_vaopt_nested_use);
+          ErrorOccurred = true;
+        }
+        IsInVAOpt = true;
+      }
+      void exitVAOpt() {
+        assert(isIn());
+        IsInVAOpt = false;
+        SawLParen = false;
+        SawTokenAfterInitialLParen = false;
+      }
+    public:
+      void processNextToken() {
+        if (Tok.getIdentifierInfo() == PP.Ident__VA_OPT__) {
+          enterVAOpt();
+          PrevTok = Tok;
+          return;
+        }
+        // do nothing if we haven't entered into a vaopt
+        if (!isIn()) return;
+
+        if (Tok.is(tok::l_paren)) {
+          sawLParen();
+        } else {
+          // __VA_OPT__ must be followed by an lparen
+          if (!SawLParen) {
+            PP.Diag(Tok, diag::err_pp_missing_lparen_in_vaopt_use);
+            ErrorOccurred = true;
+            return;
+          }
+          if (Tok.is(tok::r_paren)) {
+            sawRParen();
+          } else if (Tok.is(tok::hashhash)) {
+            if (PrevTok.is(tok::l_paren) && !SawTokenAfterInitialLParen) {
+              PP.Diag(Tok, diag::err_vaopt_paste_at_start);
+              ErrorOccurred = true;
+              return;
+            }
+          }
+          SawTokenAfterInitialLParen = true;
+        }
+        PrevTok = Tok;
+      }
+
+      VAOptState(clang::Token &T, Preprocessor &P)
+          : Tok(T), PP(P), PrevTok() {}
+      ~VAOptState() {
+        if (ErrorOccurred) return; // The error has already been emitted.
+        if (Disabled) return;
+        if (NumParens) {
+          PP.Diag(Tok, diag::err_pp_missing_rparen_in_vaopt_use);
+        } else if (isIn()) {
+          PP.Diag(Tok, diag::err_pp_missing_lparen_in_vaopt_use);
+        }
+      }
+      bool isIn() const { return IsInVAOpt; }
+      void disable() { Disabled = true; }
+      bool errorOccurred() const {
+        return ErrorOccurred;
+      }
+      VAOptState(const VAOptState&) = delete;
+    } VAOptState{Tok, *this};
+
     // Otherwise, read the body of a function-like macro.  While we are at it,
     // check C99 6.10.3.2p1: ensure that # operators are followed by macro
     // parameters in function-like macro expansions.
     while (Tok.isNot(tok::eod)) {
       LastTok = Tok;
+      VAOptState.processNextToken();
+      if (VAOptState.errorOccurred()) {
+        // Disable __VA_ARGS__ again.
+        Ident__VA_ARGS__->setIsPoisoned(true);
+        Ident__VA_OPT__->setIsPoisoned(true);
+        return;
+      }
 
       if (!Tok.isOneOf(tok::hash, tok::hashat, tok::hashhash)) {
         MI->AddTokenToBody(Tok);
@@ -2429,6 +2540,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
         if (Tok.is(tok::eod)) {
           MI->AddTokenToBody(LastTok);
+          VAOptState.processNextToken();
           break;
         }
 
@@ -2463,6 +2575,8 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
           // Disable __VA_ARGS__ again.
           Ident__VA_ARGS__->setIsPoisoned(true);
+          Ident__VA_OPT__->setIsPoisoned(true);
+          VAOptState.disable();
           return;
         }
       }
@@ -2484,7 +2598,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
   // Disable __VA_ARGS__ again.
   Ident__VA_ARGS__->setIsPoisoned(true);
-
+  Ident__VA_OPT__->setIsPoisoned(true);
   // Check that there is no paste (##) operator at the beginning or end of the
   // replacement list.
   unsigned NumTokens = MI->getNumTokens();
