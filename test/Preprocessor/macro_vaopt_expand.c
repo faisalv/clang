@@ -52,6 +52,7 @@
 // CHECK: 11: ABXX 123 123
 12: V(X)
 // CHECK: 12: AB 123
+
 #undef X
 #undef V
 
@@ -68,3 +69,27 @@
 
 15: H2(a, b, c, d) // replaced ab, c, d
 // CHECK: 15: ab, c, d
+
+#undef X
+#undef V
+
+#define V(a,...) __VA_OPT__(__VA_ARGS__)
+
+16: V(a,)
+17: V(a,,)
+// CHECK: 16: 
+// CHECK: 17: ,
+
+#undef X
+#undef V
+
+#define X 123
+#define Y xyz
+#define V(...) AB ## __VA_OPT__(__VA_ARGS__ __VA_ARGS__ __VA_ARGS__) ## BA
+
+18: V(X)
+// CHECK: 18: ABX 123 XBA  
+19: V(X, Y)
+// CHECK: 19: ABX, xyz 123, xyz 123, YBA  
+
+
