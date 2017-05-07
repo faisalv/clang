@@ -64,3 +64,7 @@
 // CHECK: 13: ABX 123 XBA  
 // CHECK: 14: AB  
 
+#define H2(X, Y, ...) __VA_OPT__(X ## Y,) __VA_ARGS__
+
+15: H2(a, b, c, d) // replaced ab, c, d
+// CHECK: 15: ab, c, d
