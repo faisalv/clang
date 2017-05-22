@@ -209,27 +209,17 @@ void TokenLexer::ExpandFunctionArguments() {
     // preprocessor already verified that the following token is a macro name
     // when the #define was parsed.
     const Token &CurTok = Tokens[i];
-    /*
-    struct SetPriorToken {
-      Token &PriorTok;
-      const Token &CurTok;
-      bool Disable;
-      ~SetPriorToken() {
-        if (!Disable)
-          PriorTok = CurTok;
-      }
-    } SetPriorToken = { PriorTok, CurTok, false };
-    //*/
-    struct SetPriorToken {
+    
+    struct UpdatePriorToken {
       Token &PriorTok;
       const Token *const Tokens;
       bool Disable;
       const unsigned &I;
-      ~SetPriorToken() {
+      ~UpdatePriorToken() {
         if (!Disable)
           PriorTok = Tokens[I];
       }
-    } SetPriorToken = { PriorTok, Tokens, false, i };
+    } UpdatePriorToken = { PriorTok, Tokens, false, i };
     if (IsInVAOPT) {
       if (CurTok.is(tok::r_paren)) 
         --SkipMatchingVAOPTSParen;
@@ -238,6 +228,8 @@ void TokenLexer::ExpandFunctionArguments() {
       if (!SkipMatchingVAOPTSParen) {
         // we matched the outermost lparen with the rparen
         IsInVAOPT = false;
+        // Don't change the prior token to rparen
+        UpdatePriorToken.Disable = true;
         continue;
       }      
     }
@@ -250,15 +242,69 @@ void TokenLexer::ExpandFunctionArguments() {
     // -> ".foo" not ". foo".
     if (i != 0 && !PriorTok.is(tok::hashhash) && CurTok.hasLeadingSpace())
        NextTokGetsSpace = true;
-
+handle_hash:
     if (CurTok.isOneOf(tok::hash, tok::hashat)) {
-      int ArgNo = Macro->getArgumentNum(Tokens[i+1].getIdentifierInfo());
+      Token ParamTok = Tokens[i+1];
+      int ArgNo = Macro->getArgumentNum(ParamTok.getIdentifierInfo());
+      if (ArgNo == -1) {
+        // If we are missing an argument next to hash - we must! have a #
+        // __VA_OPT__( parameter  or end of a __VA_OPT__(    #)
+
+        if (!HasNonEmptyVariadicArguments) {
+          assert(ParamTok.getIdentifierInfo() == PP.Ident__VA_OPT__);
+          // There are no variadic arguments so skip va_opts until we hit the
+          // matching r_paren - and set the ArgNo to the same as the empty
+          // __VA_ARGS__
+
+          assert(Tokens[i + 2].is(tok::l_paren));
+          ParamTok = Tokens[i + 3];
+          // We checked at definition time that the next token is a parameter.
+          assert(Macro->getArgumentNum(ParamTok.getIdentifierInfo()) != -1);
+
+          int MatchParens = 1;
+          for (i += 3; i != e; ++i) {
+            if (Tokens[i].is(tok::r_paren))
+              --MatchParens;
+            else if (Tokens[i].is(tok::l_paren))
+              ++MatchParens;
+            if (!MatchParens)
+              break;
+          }
+          // Set the ArgNum to the same as __VA_ARGS__ - which should also be
+          // conveniently empty - and so behave similarly to a __VA_OPT__.
+          ArgNo = Macro->getNumArgs() - 1;
+          --i; // Don't skip the rparen, since below, when we increment i for
+               // the argument, it gets taken care of.
+        } else {
+          if (IsInVAOPT) {
+            assert(ParamTok.is(tok::r_paren));
+            ++i; // Skip the r_paren
+            --SkipMatchingVAOPTSParen;  // Signal that we found the matching rparen
+            assert(SkipMatchingVAOPTSParen == 0);
+            IsInVAOPT = false;
+            goto handle_hash;
+          } else {
+            // Eat the __VA_OPT__( sequence and find the parameter
+            assert(ParamTok.getIdentifierInfo() == PP.Ident__VA_OPT__);  
+            assert( i + 3 < e && "Must have __VA_OPT__ followed by a paren");
+          
+            SkipMatchingVAOPTSParen = 1;
+            IsInVAOPT = true;
+            ParamTok = Tokens[ i + 3];
+            ArgNo = Macro->getArgumentNum(ParamTok.getIdentifierInfo());
+
+            i+=2; // Skip the __VA_OPT__ and lparen
+          
+            assert( i != e && "Can't end with __VA_OPTS__ followed by lparen");
+          }
+        }
+      }
       assert(ArgNo != -1 && "Token following # is not an argument?");
 
       SourceLocation ExpansionLocStart =
           getExpansionLocForMacroDefLoc(CurTok.getLocation());
       SourceLocation ExpansionLocEnd =
-          getExpansionLocForMacroDefLoc(Tokens[i+1].getLocation());
+          getExpansionLocForMacroDefLoc(ParamTok.getLocation());
 
       Token Res;
       if (CurTok.is(tok::hash))  // Stringify
@@ -281,6 +327,9 @@ void TokenLexer::ExpandFunctionArguments() {
 
       ResultToks.push_back(Res);
       MadeChange = true;
+      
+      assert( i <= (e - 2) ); 
+
       ++i;  // Skip arg name.
       NextTokGetsSpace = false;
       continue;
@@ -297,10 +346,17 @@ void TokenLexer::ExpandFunctionArguments() {
              tok::hashhash) || /* If we are in VAOPT check if the token after
                                   the closing paren is the concat operator*/
          (Tokens[i + 1].is(tok::r_paren) && SkipMatchingVAOPTSParen == 1 &&
-          i + 2 != e && Tokens[i + 2].is(tok::hashhash)));
-
+          i + 2 != e &&
+          Tokens[i + 2].is(tok::hashhash)) || /* If we have '##' as the first
+                                                 token within the very next
+                                                 __VA_OPT__ */
+         (HasNonEmptyVariadicArguments &&
+          Tokens[i + 1].getIdentifierInfo() == PP.Ident__VA_OPT__ &&
+          ((i + 2) != e) && Tokens[i + 2].is(tok::l_paren) && ((i + 3) != e) &&
+          Tokens[i + 3].is(tok::hashhash)));
+    PasteBefore = PasteBefore || NonEmptyPasteBefore;
     assert(!NonEmptyPasteBefore || PasteBefore);
-
+    
     // Otherwise, if this is not an argument token, just add the token to the
     // output buffer.
     IdentifierInfo *II = CurTok.getIdentifierInfo();
@@ -309,18 +365,21 @@ void TokenLexer::ExpandFunctionArguments() {
       if (II && II == PP.Ident__VA_OPT__) {
         MadeChange = true;
 
-        SetPriorToken.Disable = true;
+        UpdatePriorToken.Disable = true;
         if (i != 0) {
-          SetPriorToken.PriorTok = Tokens[i - 1];
+          UpdatePriorToken.PriorTok = Tokens[i - 1];
         }
         assert(!SkipMatchingVAOPTSParen && "can't have nested VAOPTS!");
         assert(!IsInVAOPT && "can't have nested VAOPTS!");
         
         if (HasNonEmptyVariadicArguments) {
+          assert(Tokens[i + 1].is(tok::l_paren));
           ++i; // Skip the LParen;
           assert( i != e && "Can't end with __VA_OPTS__ followed by lparen");
+          
           SkipMatchingVAOPTSParen = 1;
           IsInVAOPT = true;
+          
         } else {
           // there are no variadic arguments so skip va_opts until we hit the
           // matching r_paren
@@ -341,8 +400,16 @@ void TokenLexer::ExpandFunctionArguments() {
         }
         continue;
       } else {
-        // This isn't an argument, just add it.
-        ResultToks.push_back(CurTok);
+        if (CurTok.is(tok::hashhash) && ResultToks.empty()) {
+          // This can occur in a variadic call to F(x, ...) __VA_OPT__() __VA_OPT__(##)
+          // Don't add it to ResultToks - but let the lexer know it is the previous token.
+          UpdatePriorToken.PriorTok = CurTok;
+          UpdatePriorToken.Disable = true;
+          continue;
+        } else {
+          // This isn't an argument, just add it.
+          ResultToks.push_back(CurTok);
+        }
       }
 
       if (NextTokGetsSpace) {

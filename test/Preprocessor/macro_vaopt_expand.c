@@ -91,5 +91,62 @@
 // CHECK: 18: ABX 123 XBA  
 19: V(X, Y)
 // CHECK: 19: ABX, xyz 123, xyz 123, YBA  
+#undef V
+#undef X
+#undef Y
 
 
+#undef FOO
+#define FOO(x,...) # __VA_OPT__(x) #x #__VA_OPT__(__VA_ARGS__) 
+20: FOO(1)
+// CHECK: 20: "" "1" ""
+21: FOO(1,2,3)
+// CHECK: 21: "1" "1" "2,3"
+
+#undef FOO
+#define FOO(x,...) x __VA_OPT__(##) __VA_ARGS__
+22: FOO(1)
+// CHECK: 22: 1
+23: FOO(1,2,3)
+// CHECK: 23: 12,3
+
+#undef FOO
+#define FOO(x,...) __VA_OPT__(#) __VA_OPT__(x) __VA_OPT__(#) __VA_OPT__(__VA_ARGS__) # __VA_OPT__(x)
+24: FOO(1) END
+// CHECK: 24: "" END
+25: FOO(1,2,3) END
+// CHECK: 25: "1" "2,3" "1" END
+
+#undef FOO
+#define FOO(x,...) __VA_OPT__(#) x __VA_OPT__(#) __VA_ARGS__
+
+26: FOO(1) END
+// CHECK: 26: 1 END
+27: FOO(1,2,  3) END
+// CHECK: 27: "1" "2, 3" END
+
+
+#undef FOO
+#define FOO(x,...) __VA_OPT__(#) __VA_OPT__(x)
+
+28: FOO(1) END
+// CHECK: 28: END
+29: FOO(1,2,  3) END
+// CHECK: 29: "1" END
+
+#undef FOO
+#define FOO(x,...) __VA_OPT__() __VA_OPT__(##) x 
+#define X() expandedX
+30: FOO(X LPAREN RPAREN) END
+// CHECK: 30: expandedX END
+31: FOO(X LPAREN RPAREN, 1) END
+// CHECK: 31: X ( ) END
+
+#undef X
+#undef FOO
+#define FOO(x,y,...) x __VA_OPT__(##) __VA_OPT__(__VA_ARGS__ ##) y __VA_OPT__(##) __VA_ARGS__
+
+32: FOO(1,2,) END
+// CHECK: 32: 1 2 END
+33: FOO(1,2, 3, 4) END
+// CHECK: 33: 13, 423, 4 END

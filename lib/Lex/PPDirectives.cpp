@@ -2318,7 +2318,12 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
   Token Tok;
   LexUnexpandedToken(Tok);
-
+  auto IsVAOPTToken = [this](const clang::Token &T) {
+    if (IdentifierInfo *II = T.getIdentifierInfo()) {
+      return II == this->Ident__VA_OPT__;
+    }
+    return false;
+  };
   // If this is a function-like macro definition, parse the argument list,
   // marking each of the identifiers as being used as macro arguments.  Also,
   // check other constraints on the first token of the macro body.
@@ -2386,7 +2391,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
   if (!Tok.is(tok::eod))
     LastTok = Tok;
-
+  bool MacroEndsWithVAOPT = false;
   // Read the rest of the macro body.
   if (MI->isObjectLike()) {
     // Object-like macros are very simple, just read their body.
@@ -2397,18 +2402,24 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
       LexUnexpandedToken(Tok);
     }
   } else {
-
-    class VAOptState {
-      clang::Token &Tok;
+    
+    class VAOptFSM {
+      clang::Token Tok;
       Preprocessor &PP;
       clang::Token PrevTok;
-      
+      const bool MacroBeginsWithVAOPT;
+      bool MacroEndsWithVAOPT = false;
+
       bool IsInVAOpt = false;
       int NumParens = 0;
+      int CurTokenIndex = -1;
+      int LastClosingRParenIndex = -1;
+
       bool ErrorOccurred = false;
       bool SawLParen = false;
       bool SawTokenAfterInitialLParen = false;
       bool Disabled = false;
+      
       void sawLParen() {
         assert(isIn());
         ++NumParens;
@@ -2420,6 +2431,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
         if (NumParens) {
           if (!--NumParens) {
+            /*
             if (PrevTok.is(tok::l_paren)) {
               PP.Diag(Tok, diag::err_pp_missing_token_in_vaopt_use);
               ErrorOccurred = true;
@@ -2427,7 +2439,10 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
               PP.Diag(PrevTok,  diag::err_vaopt_paste_at_end);
               ErrorOccurred = true;
             }
+            //*/
+            LastClosingRParenIndex = CurTokenIndex;
             exitVAOpt();
+           
           }
         }
       }
@@ -2446,14 +2461,25 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
         SawTokenAfterInitialLParen = false;
       }
     public:
-      void processNextToken() {
+      void processNextToken(const clang::Token &T) {
+        ++CurTokenIndex;
+        Tok = T;
+        if (T.is(tok::eod)) {
+          if (CurTokenIndex - 1 == LastClosingRParenIndex) {
+            MacroEndsWithVAOPT = true;
+          }
+        }
         if (Tok.getIdentifierInfo() == PP.Ident__VA_OPT__) {
           enterVAOpt();
+          
           PrevTok = Tok;
           return;
         }
         // do nothing if we haven't entered into a vaopt
-        if (!isIn()) return;
+        if (!isIn()) {
+          PrevTok = Tok;
+          return;
+        }
 
         if (Tok.is(tok::l_paren)) {
           sawLParen();
@@ -2466,21 +2492,21 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
           }
           if (Tok.is(tok::r_paren)) {
             sawRParen();
-          } else if (Tok.is(tok::hashhash)) {
-            if (PrevTok.is(tok::l_paren) && !SawTokenAfterInitialLParen) {
-              PP.Diag(Tok, diag::err_vaopt_paste_at_start);
-              ErrorOccurred = true;
-              return;
-            }
           }
-          SawTokenAfterInitialLParen = true;
         }
         PrevTok = Tok;
       }
 
-      VAOptState(clang::Token &T, Preprocessor &P)
-          : Tok(T), PP(P), PrevTok() {}
-      ~VAOptState() {
+      VAOptFSM(const clang::Token &T, Preprocessor &P)
+          : Tok(), PP(P), PrevTok(),
+            MacroBeginsWithVAOPT(T.getIdentifierInfo() == P.Ident__VA_OPT__) {
+        processNextToken(T);
+      }
+      ~VAOptFSM() {
+        // Disable __VA_ARGS__, __VA_OPT__ again.
+        PP.Ident__VA_ARGS__->setIsPoisoned(true);
+        PP.Ident__VA_OPT__->setIsPoisoned(true);
+
         if (ErrorOccurred) return; // The error has already been emitted.
         if (Disabled) return;
         if (NumParens) {
@@ -2494,19 +2520,18 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
       bool errorOccurred() const {
         return ErrorOccurred;
       }
-      VAOptState(const VAOptState&) = delete;
-    } VAOptState{Tok, *this};
+      bool macroEndsWithVAOPT() const { return MacroEndsWithVAOPT; }
+      VAOptFSM(const VAOptFSM&) = delete;
+    } VAOptFSM{Tok, *this};
+
 
     // Otherwise, read the body of a function-like macro.  While we are at it,
     // check C99 6.10.3.2p1: ensure that # operators are followed by macro
     // parameters in function-like macro expansions.
     while (Tok.isNot(tok::eod)) {
       LastTok = Tok;
-      VAOptState.processNextToken();
-      if (VAOptState.errorOccurred()) {
-        // Disable __VA_ARGS__ again.
-        Ident__VA_ARGS__->setIsPoisoned(true);
-        Ident__VA_OPT__->setIsPoisoned(true);
+      
+      if (VAOptFSM.errorOccurred()) {
         return;
       }
 
@@ -2515,6 +2540,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
         // Get the next token of the macro.
         LexUnexpandedToken(Tok);
+        VAOptFSM.processNextToken(Tok);
         continue;
       }
 
@@ -2527,6 +2553,7 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
         // Get the next token of the macro.
         LexUnexpandedToken(Tok);
+        VAOptFSM.processNextToken(Tok);
         continue;
       }
 
@@ -2537,10 +2564,10 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
 
         // Get the next token of the macro.
         LexUnexpandedToken(Tok);
+        VAOptFSM.processNextToken(Tok);
 
         if (Tok.is(tok::eod)) {
-          MI->AddTokenToBody(LastTok);
-          VAOptState.processNextToken();
+          MI->AddTokenToBody(LastTok);  
           break;
         }
 
@@ -2553,9 +2580,49 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
         MI->AddTokenToBody(LastTok);
         continue;
       }
-
+      bool AlreadyAddedHashToMacro = false;
+      Token HashTok = LastTok;
+handle_hash:
+      // Tok is the stringizing '#' - so handle the valid sequence of
+      // stringizable tokens:
+      //  1) # macro-param
+      //  2) # __VA_OPT(macro-param
+      //  3) __VA_OPT__(   # ) ...
       // Get the next token of the macro.
       LexUnexpandedToken(Tok);
+      const bool WasInVAOPT = VAOptFSM.isIn();
+      VAOptFSM.processNextToken(Tok);  // This may kick us out of vaopt if Tok is the last matching r_paren
+      if (VAOptFSM.errorOccurred()) return;
+
+      if (IsVAOPTToken(Tok)) {
+        // We add the tokens to the Macro first, and deal with the error of not
+        // having the parameter as the first token within vaopt if it occurs.
+
+        // FIXME: Handle the ASM jibberish case by saving the index of the hash
+        // token, and then resetting it to unknown, below.
+        //if (!AlreadyAddedHashToMacro) {
+        MI->AddTokenToBody(LastTok); // Add '#'
+        AlreadyAddedHashToMacro = true;
+        
+        MI->AddTokenToBody(Tok); // Add VAOPT
+        
+        LexUnexpandedToken(Tok);
+        VAOptFSM.processNextToken(Tok);
+        if (VAOptFSM.errorOccurred()) return;
+        assert(Tok.is(tok::l_paren) &&
+               "if not lparen following vaopt, error should have occurred");
+        LastTok = Tok;
+        LexUnexpandedToken(Tok);
+        VAOptFSM.processNextToken(Tok);
+        if (VAOptFSM.errorOccurred()) return;
+      } else if (Tok.is(tok::r_paren) && WasInVAOPT && !VAOptFSM.isIn()) {
+        // handle  __VA_OPT__(#) ...
+        MI->AddTokenToBody(LastTok);
+        AlreadyAddedHashToMacro = true;
+        
+        LastTok = Tok;
+        goto handle_hash;
+      }
 
       // Check for a valid macro arg identifier.
       if (Tok.getIdentifierInfo() == nullptr ||
@@ -2576,19 +2643,23 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
           // Disable __VA_ARGS__ again.
           Ident__VA_ARGS__->setIsPoisoned(true);
           Ident__VA_OPT__->setIsPoisoned(true);
-          VAOptState.disable();
+          VAOptFSM.disable();
           return;
         }
       }
 
-      // Things look ok, add the '#' and param name tokens to the macro.
+      // Things look ok, add the '#' (or in case of vaopt the lparen) and param name tokens to the macro.
       MI->AddTokenToBody(LastTok);
       MI->AddTokenToBody(Tok);
       LastTok = Tok;
 
       // Get the next token of the macro.
       LexUnexpandedToken(Tok);
+      VAOptFSM.processNextToken(Tok);
     }
+    if (VAOptFSM.errorOccurred()) return;
+    MacroEndsWithVAOPT = VAOptFSM.macroEndsWithVAOPT();
+    
   }
 
   if (MacroShadowsKeyword &&
@@ -2610,6 +2681,18 @@ void Preprocessor::HandleDefineDirective(Token &DefineTok,
     if (MI->getReplacementToken(NumTokens-1).is(tok::hashhash)) {
       Diag(MI->getReplacementToken(NumTokens-1), diag::err_paste_at_end);
       return;
+    }
+    if (NumTokens >= 3) {
+      if (IsVAOPTToken(MI->getReplacementToken(0)) &&
+          MI->getReplacementToken(2).is(tok::hashhash)) {
+        Diag(MI->getReplacementToken(2), diag::err_paste_at_start);
+        return;
+      }
+      if (MI->getReplacementToken(NumTokens - 1).is(tok::r_paren) &&
+          MI->getReplacementToken(NumTokens - 2).is(tok::hashhash) && MacroEndsWithVAOPT) {
+        Diag(MI->getReplacementToken(NumTokens - 2), diag::err_paste_at_end);
+        return;
+      }
     }
   }
 
